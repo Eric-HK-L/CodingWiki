@@ -183,6 +183,23 @@ class FilesystemPageStore:
             return []
         return sorted(p.name for p in root.iterdir() if p.is_dir())
 
+    def load_published_pages(self, version_id: str | None = None) -> list[tuple[str, str, str]]:
+        """读取某发布版本（默认当前版本）的全部页面：(page_id, title, page_text)。供索引切块用。"""
+        version = version_id or self.current_version()
+        if version is None:
+            return []
+        index = self.version_index(version)
+        if index is None:
+            return []
+        pages_dir = self._root / "versions" / version / "pages"
+        pages: list[tuple[str, str, str]] = []
+        for entry in index.pages:
+            path = (pages_dir / entry.page_id).with_suffix(".md")
+            if not path.is_file():
+                continue
+            pages.append((entry.page_id, entry.title, path.read_text(encoding="utf-8")))
+        return pages
+
     # ---------------------------------------------------------------- 内部
 
     @property
