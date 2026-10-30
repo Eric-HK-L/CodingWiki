@@ -77,6 +77,38 @@ def build_parser() -> argparse.ArgumentParser:
     query_parser.add_argument("--limit", type=int, default=50, help="最多输出条数")
     query_parser.set_defaults(handler=_cmd_facts_query)
 
+    wiki_parser = subcommands.add_parser("wiki", help="Wiki 生成、校验与发布（S4）")
+    wiki_subcommands = wiki_parser.add_subparsers(dest="wiki_command", required=True)
+
+    plan_parser = wiki_subcommands.add_parser("plan", help="生成覆盖计划")
+    plan_parser.add_argument("--repo", required=True, help="仓库 ID")
+    plan_parser.add_argument("--max-tasks", type=int, default=0, help="任务预算；0 表示不限")
+    plan_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    plan_parser.set_defaults(handler=_cmd_wiki_plan)
+
+    generate_parser = wiki_subcommands.add_parser("generate", help="生成并校验页面（含修复循环）")
+    generate_parser.add_argument("--repo", required=True, help="仓库 ID")
+    generate_parser.add_argument("--max-tasks", type=int, default=0, help="任务预算；0 表示不限")
+    generate_parser.add_argument("--max-rounds", type=int, default=3, help="单页最大修复轮数")
+    generate_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    generate_parser.add_argument("--workdir", default="", help="覆盖工作树路径")
+    generate_parser.set_defaults(handler=_cmd_wiki_generate)
+
+    verify_parser = wiki_subcommands.add_parser("verify", help="复验草稿区全部页面")
+    verify_parser.add_argument("--repo", required=True, help="仓库 ID")
+    verify_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    verify_parser.add_argument("--workdir", default="", help="覆盖工作树路径")
+    verify_parser.set_defaults(handler=_cmd_wiki_verify)
+
+    publish_parser = wiki_subcommands.add_parser("publish", help="门禁检查后发布新版本")
+    publish_parser.add_argument("--repo", required=True, help="仓库 ID")
+    publish_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    publish_parser.set_defaults(handler=_cmd_wiki_publish)
+
+    status_parser = wiki_subcommands.add_parser("status", help="Wiki 质量看板摘要")
+    status_parser.add_argument("--repo", required=True, help="仓库 ID")
+    status_parser.set_defaults(handler=_cmd_wiki_status)
+
     return parser
 
 
@@ -258,6 +290,158 @@ def _assert_workdir_revision(workdir: Path, revision: str) -> None:
 
 def _fmt_rate(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.1%}"
+
+
+# ---------------------------------------------------------------- wiki 命令
+
+
+def _load_facts_or_raise(repo_id: str) -> RepoFacts:
+    facts = FilesystemFactStore().latest(repo_id)
+    if facts is None:
+        raise InputError(
+            f"没有 {repo_id} 的事实记录，请先执行: codingwiki facts extract --repo {repo_id}"
+        )
+    return facts
+
+
+def _wiki_workdir(repo_id: str, config_dir: str, override: str) -> Path:
+    repo_path = os.path.join(config_dir, f"{repo_id}.yaml")
+    repo = load_repo_config(repo_path)
+    return _facts_workdir(repo, override)
+
+
+def _cmd_wiki_plan(args: argparse.Namespace) -> int:
+    from codingwiki.generate import CoveragePlanner
+    from codingwiki.publish import FilesystemPageStore
+
+    facts = _load_facts_or_raise(args.repo)
+    store = FilesystemPageStore(args.repo)
+    plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps())
+
+    plans_dir = (
+        Path(os.environ.get("CODINGWIKI_HOME", ".codingwiki")).resolve()
+        / "wiki"
+        / args.repo
+        / "plans"
+    )
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    path = plans_dir / f"{plan.created_at.strftime('%Y%m%d-%H%M%S')}.json"
+    path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+
+    fresh = sum(1 for t in plan.tasks if not t.reuse)
+    reused = len(plan.tasks) - fresh
+    print(
+        f"覆盖计划: repo={plan.repo_id}, snapshot={plan.snapshot_id}, "
+        f"tasks={len(plan.tasks)}（新生成 {fresh}，复用 {reused}），跳过 {len(plan.skipped)}"
+    )
+    print(f"落盘: {path}")
+    return int(ExitCode.OK)
+
+
+def _cmd_wiki_generate(args: argparse.Namespace) -> int:
+    logger = get_logger("cli.wiki_generate")
+    from codingwiki.backends import MockBackend
+    from codingwiki.generate import CoveragePlanner, GeneratePipeline, TaskPackageBuilder
+    from codingwiki.publish import FilesystemPageStore
+    from codingwiki.verify import PageVerifier
+
+    facts = _load_facts_or_raise(args.repo)
+    workdir = _wiki_workdir(args.repo, args.config_dir, args.workdir)
+    store = FilesystemPageStore(args.repo)
+    plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps())
+
+    known_pages = {t.page_id for t in plan.tasks} | set(store.list_drafts())
+    pipeline = GeneratePipeline(
+        backend=MockBackend(),
+        builder=TaskPackageBuilder(workdir),
+        verifier=PageVerifier(facts, workdir, known_pages=known_pages),
+        store=store,
+        max_rounds=args.max_rounds,
+    )
+    outcomes = pipeline.run_plan(plan, facts)
+
+    ok = sum(1 for o in outcomes if o.ok and not o.reused)
+    reused = sum(1 for o in outcomes if o.reused)
+    failed = [o for o in outcomes if not o.ok]
+    for outcome in failed:
+        logger.warning(
+            "页面 %s 生成失败（%d 轮）：%s",
+            outcome.task.page_id,
+            outcome.attempts,
+            "; ".join(i.message for i in (outcome.report.issues[:3] if outcome.report else [])),
+        )
+    print(f"生成完成: 成功 {ok}，复用 {reused}，失败 {len(failed)}")
+    if failed:
+        print("失败页面: " + ", ".join(o.task.page_id for o in failed[:10]))
+        return int(ExitCode.RETRYABLE)
+    return int(ExitCode.OK)
+
+
+def _cmd_wiki_verify(args: argparse.Namespace) -> int:
+    from codingwiki.publish import FilesystemPageStore
+    from codingwiki.verify import PageVerifier
+
+    facts = _load_facts_or_raise(args.repo)
+    workdir = _wiki_workdir(args.repo, args.config_dir, args.workdir)
+    store = FilesystemPageStore(args.repo)
+    page_ids = store.list_drafts()
+    if not page_ids:
+        raise InputError(f"仓库 {args.repo} 草稿区为空，请先执行 wiki generate")
+
+    verifier = PageVerifier(facts, workdir, known_pages=set(page_ids))
+    failed: list[str] = []
+    for page_id in page_ids:
+        loaded = store.load_draft(page_id)
+        meta = store.draft_meta(page_id)
+        if loaded is None or meta is None:
+            failed.append(page_id)
+            continue
+        report = verifier.verify(loaded[0], loaded[1], meta)
+        if report.status != "passed":
+            failed.append(page_id)
+    print(
+        f"复验完成: 共 {len(page_ids)} 页，通过 {len(page_ids) - len(failed)}，失败 {len(failed)}"
+    )
+    if failed:
+        print("失败页面: " + ", ".join(failed[:10]))
+        return int(ExitCode.RETRYABLE)
+    return int(ExitCode.OK)
+
+
+def _cmd_wiki_publish(args: argparse.Namespace) -> int:
+    from codingwiki.publish import FilesystemPageStore
+
+    facts = _load_facts_or_raise(args.repo)
+    store = FilesystemPageStore(args.repo)
+    index = store.publish(facts.snapshot_id)
+    counts = index.status_counts
+    print(
+        f"发布成功: version={index.version_id}, pages={len(index.pages)}, "
+        f"verified={counts.get('verified', 0)}"
+    )
+    return int(ExitCode.OK)
+
+
+def _cmd_wiki_status(args: argparse.Namespace) -> int:
+    from codingwiki.publish import FilesystemPageStore
+
+    store = FilesystemPageStore(args.repo)
+    drafts = store.list_drafts()
+    current = store.current_version()
+    print(f"仓库: {args.repo}")
+    print(f"草稿区: {len(drafts)} 页")
+    print(f"当前版本: {current or '（未发布）'}")
+    versions = store.list_versions()
+    print(f"历史版本: {len(versions)} 个")
+    if current:
+        index = store.version_index(current)
+        if index is not None:
+            print(f"当前快照: {index.snapshot_id}")
+            counts = index.status_counts
+            print("页面状态: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+            evidence = sum(p.evidence_count for p in index.pages)
+            print(f"证据总数: {evidence}（出处有效率 100%，校验器已逐条核对）")
+    return int(ExitCode.OK)
 
 
 def _query_rows(

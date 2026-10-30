@@ -185,10 +185,20 @@ class RepoFacts(_FactModel):
     config_facts: list[ConfigFact] = Field(default_factory=list)
     tests: list[TestFact] = Field(default_factory=list)
     quality: QualityReport = Field(default_factory=QualityReport)
+    # 快照内全部在范围文件的 path → blob_sha256（含 CMake/配置等非代码文件），
+    # 供 wiki 依赖记录与增量复用比对；代码文件的 blob 与 files[*].blob_sha256 一致。
+    blobs: dict[str, str] = Field(default_factory=dict)
 
     @property
     def file_count(self) -> int:
         return len(self.files)
+
+    @property
+    def blob_by_path(self) -> dict[str, str]:
+        """path → blob_sha256：快照全量 blobs 优先，回落到代码文件事实。"""
+        merged = {f.path: f.blob_sha256 for f in self.files}
+        merged.update(self.blobs)
+        return merged
 
     @property
     def symbol_count(self) -> int:
