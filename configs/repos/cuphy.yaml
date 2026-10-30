@@ -1,0 +1,9 @@
+repo_id: cuphy
+provider: github
+url: https://github.com/NVIDIA/aerial-cuda-accelerated-ran.git
+branch: main
+root: cuPHY
+revision: latest
+# workdir 留空表示用默认：.codingwiki/repos/cuphy/work
+# excludes 和 binary_extensions 走默认规则即可，这里不覆盖
+max_text_file_size_kb: 2048

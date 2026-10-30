@@ -24,6 +24,7 @@ logs/
 # 下载物、缓存、数据、模型：都在工作区内，但不进版本库
 vendor/
 .cache/
+.codingwiki/
 data/
 models/
 *.sqlite3
