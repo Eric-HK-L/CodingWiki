@@ -2,6 +2,9 @@
 
 只做三件事：检查文件、按 YAML 安全解析、交给 Pydantic 校验。
 任何一步失败都抛出带原因的错误，不返回半成品对象。
+
+StrictLoader 是公开导出，仓库级加载器 repo_loader.py 也用它，
+避免两处重复实现。
 """
 
 from __future__ import annotations
@@ -19,17 +22,17 @@ from codingwiki.errors import ConfigFormatError, ConfigNotFoundError, ConfigVali
 ALLOWED_SUFFIXES = frozenset({".yaml", ".yml"})
 
 
-class _StrictLoader(yaml.SafeLoader):
+class StrictLoader(yaml.SafeLoader):
     """安全加载器：重复键报错；布尔只认 true/false（YAML 1.2 语义）。"""
 
 
 # 去掉 YAML 1.1 的隐式布尔词（yes/no/on/off），只保留 true/false，
 # 避免 `telemetry: no` 被悄悄解析成 False 或字符串，导致配置含义漂移。
-_StrictLoader.yaml_implicit_resolvers = {
+StrictLoader.yaml_implicit_resolvers = {
     key: [pair for pair in pairs if pair[0] != "tag:yaml.org,2002:bool"]
     for key, pairs in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
-_StrictLoader.add_implicit_resolver(
+StrictLoader.add_implicit_resolver(
     "tag:yaml.org,2002:bool",
     re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
     list("tTfF"),
@@ -37,7 +40,7 @@ _StrictLoader.add_implicit_resolver(
 
 
 def _construct_mapping(
-    loader: _StrictLoader, node: yaml.MappingNode, deep: bool = False
+    loader: StrictLoader, node: yaml.MappingNode, deep: bool = False
 ) -> dict[Any, Any]:
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
@@ -52,7 +55,7 @@ def _construct_mapping(
     return mapping
 
 
-_StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
+StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -84,7 +87,7 @@ def parse_config(text: str, *, source: str = "<string>") -> AppConfig:
         raise ConfigFormatError(f"配置文件为空: {source}")
 
     try:
-        data = yaml.load(text, Loader=_StrictLoader)
+        data = yaml.load(text, Loader=StrictLoader)
     except ConfigFormatError:
         raise
     except yaml.YAMLError as exc:
@@ -111,4 +114,4 @@ def _format_validation_error(exc: ValidationError, source: str) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["ALLOWED_SUFFIXES", "load_config", "parse_config"]
+__all__ = ["ALLOWED_SUFFIXES", "StrictLoader", "load_config", "parse_config"]
