@@ -146,6 +146,7 @@ class FilesystemFactExtractor:
             config_facts=sorted(config_facts, key=lambda c: (c.path, c.line, c.key)),
             tests=tests,
             quality=quality,
+            blobs={e.path: e.blob_sha256 for e in entries},
         )
 
 
