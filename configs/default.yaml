@@ -1,0 +1,44 @@
+# 主配置示例：默认走 Cline headless，Gauss 关闭，向量化与重排都用本地模型。
+# 规则见 docs/CodingWiki-项目开发计划.md 3.8 节与 20.7 节。
+config_version: "1.0"
+id: default
+
+model:
+  backend: cline
+  cline:
+    command: ["cline"]
+    args: ["--headless", "--workspace", "{workspace}", "--task-file", "{task_file}"]
+    timeout_s: 1800
+    model_name: ""
+    telemetry: false
+  gauss:
+    enabled: false
+    base_url: ""
+    api_key_env: CODINGWIKI_GAUSS_KEY
+    model: ""
+    max_requests_per_minute: 30
+    max_concurrent: 1
+    daily_budget: 200
+  api:
+    enabled: false
+    base_url: ""
+    api_key_env: CODINGWIKI_API_KEY
+    model: ""
+
+embedding:
+  backend: local
+  model_path: .cache/models/bge-m3
+  device: cpu
+  batch_size: 32
+  dimension: 1024
+
+reranker:
+  enabled: false
+  model_path: .cache/models/bge-reranker-v2-m3
+  device: cpu
+  top_n: 8
+
+retrieval:
+  top_k: 20
+  keyword_weight: 0.5
+  vector_weight: 0.5

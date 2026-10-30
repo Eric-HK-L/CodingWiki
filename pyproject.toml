@@ -1,0 +1,46 @@
+[project]
+name = "codingwiki"
+version = "0.1.0"
+description = "CodingWiki：代码仓库百科（Repo Wiki + RAG）"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+  "pydantic>=2.8,<3",
+  "PyYAML>=6.0.2,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "ruff>=0.6,<1",
+  "mypy>=1.11,<2",
+  "types-PyYAML>=6.0.12,<7",
+]
+
+[project.scripts]
+codingwiki = "codingwiki.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codingwiki"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["codingwiki"]
+mypy_path = "src"

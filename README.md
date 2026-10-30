@@ -25,14 +25,20 @@ CodingWiki 是一套“代码仓库百科”系统：把一个大型代码仓库
 ## 本地开发
 
 ```bash
-# 激活位于工作区内的虚拟环境
+# 激活位于工作区内的虚拟环境（由 uv 创建，Python 3.12）
 source .venv/bin/activate
 
-# 安装依赖（用锁文件，避免版本漂移）
-uv pip install -r requirements.lock
+# 安装运行与开发依赖（用 uv.lock 保证版本一致）
+uv sync --extra dev
 
-# 检查工作区是否干净
-git status --porcelain
+# 本地检查
+ruff check .
+ruff format --check .
+mypy
+pytest
+
+# 校验配置
+codingwiki config validate --file configs/default.yaml
 ```
 
 ## 许可证
