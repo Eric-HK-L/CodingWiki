@@ -38,3 +38,9 @@ models/
 # 本地覆盖配置；示例配置可提交，真实密钥只走环境变量
 configs/local/
 *.local.yaml
+
+# 本地私有配置：API 端点 / 模型名 / 密钥引用，绝不上传 GitHub
+configs/*.local.yml
+*.secret.yaml
+*.secret.json
+.env.*

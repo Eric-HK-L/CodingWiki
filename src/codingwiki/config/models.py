@@ -91,12 +91,26 @@ class GaussSettings(_StrictModel):
 
 
 class ApiSettings(_StrictModel):
-    """公司外使用的通用 API 模型后端（保留能力，公司内不启用）。"""
+    """通用 API 模型后端（公司外使用；公司内改走 Cline）。
+
+    密钥来源二选一，优先 api_key_file：
+    - api_key_file：本机密钥文件路径（只写路径，不写内容）。**不要写进仓库内的
+      configs/default.yaml**，只写进已 gitignore 的 configs/*.local.yaml；
+    - api_key_env：环境变量名（默认 CODINGWIKI_API_KEY）。
+
+    max_tokens 下限是 16384：实测 8192 会在页面 JSON 未闭合时被截断
+    （finish_reason=length），Output 被丢弃，必须留足余量。
+    """
 
     enabled: StrictBool = False
     base_url: str = ""
     api_key_env: str = "CODINGWIKI_API_KEY"
+    api_key_file: str = ""
     model: str = ""
+    timeout_s: int = Field(default=300, ge=1, le=86_400)
+    max_retries: int = Field(default=3, ge=0, le=10)
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=16_384, ge=16_384, le=131_072)
 
 
 class ModelSettings(_StrictModel):
@@ -121,40 +135,45 @@ class ModelSettings(_StrictModel):
             ]
             if missing:
                 raise ValueError("model.api 缺少字段: " + ", ".join(missing))
+            if not (self.api.api_key_env or self.api.api_key_file):
+                raise ValueError("model.api 需要 api_key_env 或 api_key_file 之一")
         return self
 
 
 class EmbeddingSettings(_StrictModel):
-    """向量化模型。本地模型允许在工作区 vendor/ 下，路径必须显式配置。"""
+    """向量化模型。local=真实模型（bge-m3），hash=词面占位（离线/CI 默认）。
 
-    backend: Literal["local", "api"] = "local"
-    model_path: str = Field(min_length=1)
-    device: Literal["cpu", "cuda"] = "cpu"
+    model_path 为空表示「由运行时自动解析」：依次尝试 CODINGWIKI_MODEL_DIR、
+    ~/models/BAAI/<name>、工作区 .cache/models/<name>；解析失败时才报错。
+    """
+
+    backend: Literal["local", "api", "hash"] = "local"
+    model_path: str = ""
+    device: Literal["cpu", "cuda", "mps", "auto"] = "auto"
     batch_size: int = Field(default=32, ge=1, le=512)
+    max_length: int = Field(default=512, ge=32, le=8192)
     dimension: int = Field(default=1024, ge=1, le=8192)
 
 
 class RerankerSettings(_StrictModel):
-    """重排模型。默认关闭；启用时必须给出模型路径。"""
+    """重排模型。默认关闭。model_path 为空时同 EmbeddingSettings 自动解析。"""
 
     enabled: StrictBool = False
     model_path: str = ""
-    device: Literal["cpu", "cuda"] = "cpu"
+    device: Literal["cpu", "cuda", "mps", "auto"] = "auto"
+    batch_size: int = Field(default=16, ge=1, le=256)
     top_n: int = Field(default=8, ge=1, le=100)
-
-    @model_validator(mode="after")
-    def _require_path_when_enabled(self) -> RerankerSettings:
-        if self.enabled and not self.model_path:
-            raise ValueError("reranker 已启用但缺少 model_path")
-        return self
 
 
 class RetrievalSettings(_StrictModel):
-    """检索参数：关键词与向量两路融合。"""
+    """检索参数：关键词与向量两路融合，可选重排。"""
 
     top_k: int = Field(default=20, ge=1, le=100)
     keyword_weight: float = Field(default=0.5, ge=0.0, le=1.0)
     vector_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    # 真实语义模型下的拒答门槛（哈希后端改用规模自适应公式，不受此值影响）
+    min_vector_score: float = Field(default=0.35, ge=0.0, le=1.0)
+    rerank_pool: int = Field(default=20, ge=1, le=200)
 
     @model_validator(mode="after")
     def _weights_not_both_zero(self) -> RetrievalSettings:

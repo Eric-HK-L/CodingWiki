@@ -61,13 +61,14 @@ def test_config_validate_accepts_valid_file(tmp_path: Path) -> None:
 
 def test_config_validate_rejects_invalid_file(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text('config_version: "1.0"\nembedding: {}\n', encoding="utf-8")
+    # 空 model_path 合法（运行时自动解析），用越界 dimension 构造真正的非法配置
+    path.write_text('config_version: "1.0"\nembedding: {dimension: 0}\n', encoding="utf-8")
 
     result = _run("config", "validate", "--file", str(path), cwd=tmp_path)
 
     assert result.returncode == 2
     assert "配置校验失败" in result.stderr
-    assert "model_path" in result.stderr
+    assert "dimension" in result.stderr
 
 
 def test_config_validate_reports_missing_file(tmp_path: Path) -> None:

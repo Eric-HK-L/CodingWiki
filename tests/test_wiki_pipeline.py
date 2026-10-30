@@ -70,14 +70,17 @@ def test_plan_covers_page_types(home: Path, work: Path) -> None:
     assert PageType.CONFIG in types
     assert PageType.TEST in types
     assert PageType.OVERVIEW in types
+    assert PageType.ARCHITECTURE in types
     assert PageType.HOME in types
-    # fixture 有公开头文件与 CUDA kernel → 接口页；main → 流程页
+    assert PageType.GLOSSARY in types
+    # fixture 有公开头文件与 CUDA kernel → 按文件聚合的接口页；main → 流程页
     assert PageType.INTERFACE in types
     assert PageType.FLOW in types
     page_ids = {t.page_id for t in plan.tasks}
     assert "module/src" in page_ids
     assert "overview" in page_ids
-    assert any(pid.startswith("interface/src/engine.h/") for pid in page_ids)
+    assert "interface/src/engine" in page_ids
+    assert not any("/" in pid.split("interface/", 1)[-1] and pid.count("/") > 2 for pid in page_ids)
 
 
 def test_plan_max_tasks_truncates(home: Path, work: Path) -> None:
@@ -85,8 +88,8 @@ def test_plan_max_tasks_truncates(home: Path, work: Path) -> None:
     plan = CoveragePlanner(max_tasks=3).plan(facts)
     assert len(plan.tasks) == 3
     assert len(plan.skipped) > 0
-    # 预算截断时接口页优先（9.3：先保 C2）
-    assert all(t.page_type is PageType.INTERFACE for t in plan.tasks)
+    # 预算截断时先保导航页（首页/总览/架构），否则读者没有入口
+    assert {t.page_id for t in plan.tasks} == {"home", "overview", "architecture"}
 
 
 def test_full_pipeline_generates_and_publishes(home: Path, work: Path) -> None:
@@ -213,10 +216,10 @@ def test_incremental_reuse_unchanged_pages(home: Path, work: Path) -> None:
     plan2 = CoveragePlanner().plan(facts_v2, store.load_deps())
     reused = {t.page_id for t in plan2.tasks if t.reuse}
     fresh = {t.page_id for t in plan2.tasks if not t.reuse}
-    # test/tests 页依赖 tests/test_sample.py，需重新生成；其余多数复用
-    assert "test/tests" in fresh
-    assert "module/src" in reused
-    assert len(reused) > len(fresh)
+    # tests/test_sample.py 变化的页面需要重生成；src 模块页复用
+    assert "test/overview" in fresh
+    assert "module/tests" in fresh
+    assert {"module/src", "flow/src/main", "interface/src/engine"} <= reused
 
 
 def test_empty_facts_plan_is_empty(home: Path, work: Path) -> None:

@@ -21,24 +21,33 @@ model:
     daily_budget: 200
   api:
     enabled: false
-    base_url: ""
+    base_url: ""              # OpenAI 兼容端点；私有端点只写进 configs/*.local.yaml
     api_key_env: CODINGWIKI_API_KEY
+    api_key_file: ""          # 可选：本机密钥文件路径；仓库配置留空
     model: ""
+    timeout_s: 300            # 单次请求超时（秒）
+    max_retries: 3            # 429/5xx/网络错误的重试次数
+    temperature: 0.2          # 文档生成要稳定，不要发散
+    max_tokens: 16384         # 必须 ≥16384：8192 会截断页面 JSON
 
 embedding:
-  backend: local
-  model_path: .cache/models/bge-m3
-  device: cpu
+  backend: local          # local=真实模型；hash=词面占位（离线/CI）
+  model_path: ""          # 空则由 CODINGWIKI_MODEL_DIR 或 ~/models/BAAI 自动解析
+  device: auto            # auto / cpu / mps / cuda
   batch_size: 32
+  max_length: 512
   dimension: 1024
 
 reranker:
-  enabled: false
-  model_path: .cache/models/bge-reranker-v2-m3
-  device: cpu
+  enabled: true
+  model_path: ""          # 同上；默认解析 bge-reranker-v2-m3
+  device: auto
+  batch_size: 16
   top_n: 8
 
 retrieval:
   top_k: 20
   keyword_weight: 0.5
   vector_weight: 0.5
+  min_vector_score: 0.35  # 真实语义模型的拒答门槛；哈希后端用规模自适应公式
+  rerank_pool: 20

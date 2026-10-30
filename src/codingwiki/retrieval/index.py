@@ -36,6 +36,9 @@ class FilesystemIndexStore:
             raise InputError(f"切块数 {len(chunks)} 与向量数 {len(vectors)} 不一致")
         if not chunks:
             raise InputError("没有任何切块，拒绝建立空索引")
+        for vec in vectors:
+            if len(vec) != dim:
+                raise InputError(f"向量维度 {len(vec)} 与声明的 dim={dim} 不一致")
         ids = [c.chunk_id for c in chunks]
         if len(set(ids)) != len(ids):
             raise InputError("chunk_id 存在重复")

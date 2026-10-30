@@ -42,7 +42,7 @@ def test_minimal_config_uses_documented_defaults() -> None:
     assert config.model.backend.value == "cline"
     assert config.model.gauss.enabled is False
     assert config.model.cline.timeout_s == 1800
-    assert config.embedding.device == "cpu"
+    assert config.embedding.device == "auto"
     assert config.embedding.dimension == 1024
     assert config.reranker.enabled is False
     assert config.retrieval.top_k == 20
@@ -243,13 +243,14 @@ embedding:
     assert "config_version" in str(excinfo.value)
 
 
-def test_missing_embedding_model_path_is_rejected(tmp_path: Path) -> None:
+def test_empty_model_path_means_autodiscovery(tmp_path: Path) -> None:
+    """空 model_path 表示运行时自动解析模型目录，配置层不报错。"""
     path = _write(tmp_path, "config.yaml", 'config_version: "1.0"\nembedding: {}\n')
 
-    with pytest.raises(ConfigValidationError) as excinfo:
-        load_config(path)
+    config = load_config(path)
 
-    assert "model_path" in str(excinfo.value)
+    assert config.embedding.model_path == ""
+    assert config.embedding.backend == "local"
 
 
 def test_gauss_backend_requires_gauss_enabled(tmp_path: Path) -> None:
@@ -292,7 +293,90 @@ embedding:
     assert "api" in str(excinfo.value)
 
 
-def test_reranker_enabled_without_path_is_rejected(tmp_path: Path) -> None:
+def test_api_generation_defaults_are_safe_for_long_pages(tmp_path: Path) -> None:
+    """默认 max_tokens 必须 ≥16384，避免页面 JSON 在 8192 处截断。"""
+    path = _write(
+        tmp_path,
+        "config.yaml",
+        """
+config_version: "1.0"
+model:
+  backend: api
+  api:
+    enabled: true
+    base_url: "http://127.0.0.1:9999"
+    model: "stub-model"
+embedding:
+  model_path: ".cache/models/bge-m3"
+""",
+    )
+
+    api = load_config(path).model.api
+
+    assert api.timeout_s == 300
+    assert api.max_retries == 3
+    assert api.temperature == 0.2
+    assert api.max_tokens == 16_384
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("timeout_s", 0),
+        ("max_retries", -1),
+        ("max_retries", 11),
+        ("temperature", -0.1),
+        ("temperature", 2.1),
+        ("max_tokens", 8192),
+        ("max_tokens", 131_073),
+    ],
+)
+def test_api_generation_bounds_are_enforced(tmp_path: Path, field: str, value: int | float) -> None:
+    path = _write(
+        tmp_path,
+        "config.yaml",
+        f"""
+config_version: "1.0"
+model:
+  backend: api
+  api:
+    enabled: true
+    base_url: "http://127.0.0.1:9999"
+    model: "stub-model"
+    {field}: {value}
+embedding:
+  model_path: ".cache/models/bge-m3"
+""",
+    )
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load_config(path)
+
+    assert field in str(excinfo.value)
+
+
+def test_api_max_tokens_floor_is_accepted(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "config.yaml",
+        """
+config_version: "1.0"
+model:
+  backend: api
+  api:
+    enabled: true
+    base_url: "http://127.0.0.1:9999"
+    model: "stub-model"
+    max_tokens: 16384
+embedding:
+  model_path: ".cache/models/bge-m3"
+""",
+    )
+
+    assert load_config(path).model.api.max_tokens == 16_384
+
+
+def test_reranker_enabled_with_autodiscovery_path(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
         "config.yaml",
@@ -305,10 +389,10 @@ reranker:
 """,
     )
 
-    with pytest.raises(ConfigValidationError) as excinfo:
-        load_config(path)
+    config = load_config(path)
 
-    assert "model_path" in str(excinfo.value)
+    assert config.reranker.enabled is True
+    assert config.reranker.model_path == ""
 
 
 def test_retrieval_weights_both_zero_is_rejected(tmp_path: Path) -> None:
