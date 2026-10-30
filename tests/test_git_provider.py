@@ -263,9 +263,11 @@ def test_create_provider_git_returns_gitprovider() -> None:
     assert isinstance(provider, GitProvider)
 
 
-def test_create_provider_github_returns_gitprovider() -> None:
+def test_create_provider_github_returns_githubprovider() -> None:
+    from codingwiki.providers import GitHubProvider
+
     provider = create_provider(RepoType.GITHUB)
-    assert isinstance(provider, GitProvider)
+    assert isinstance(provider, GitHubProvider)
 
 
 def test_create_provider_p4_raises_environment_issue() -> None:

@@ -35,9 +35,14 @@ class SourceProvider(Protocol):
 def create_provider(provider_type: RepoType) -> SourceProvider:
     """按 RepoType 创建对应 Provider。
 
+    GIT 与 GITHUB 都走 git 协议，但 GitHub 多一层 URL 规范化和令牌鉴权；
     P4 在 S3 实现，这里只放占位——抛 EnvironmentIssue，提示配置到位后再启用。
     """
-    if provider_type in (RepoType.GIT, RepoType.GITHUB):
+    if provider_type is RepoType.GITHUB:
+        from codingwiki.providers.github import GitHubProvider
+
+        return GitHubProvider()
+    if provider_type is RepoType.GIT:
         from codingwiki.providers.git import GitProvider
 
         return GitProvider()

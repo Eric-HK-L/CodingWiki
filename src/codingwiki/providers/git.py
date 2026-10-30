@@ -61,6 +61,8 @@ class GitProvider:
             ["fetch", "--prune", "origin", repo.branch],
             cwd=bare,
             retryable=True,
+            extra_args=self._auth_args(repo),
+            env=self._command_env(),
         )
 
         # 用 worktree 固定到该 SHA；--force 以防 dir 残留
@@ -101,6 +103,20 @@ class GitProvider:
             default_branch=repo.branch,
         )
 
+    # ------------------------------------------------------------------ 可覆盖钩子
+
+    def _effective_url(self, repo: RepoConfig) -> str:
+        """实际用于 clone 的 URL；子类可做规范化（如 GitHub 简写补全）。"""
+        return repo.url
+
+    def _auth_args(self, repo: RepoConfig) -> list[str]:
+        """鉴权相关的 `git -c ...` 前置参数；默认无。"""
+        return []
+
+    def _command_env(self) -> dict[str, str] | None:
+        """额外环境变量；默认无。"""
+        return None
+
     # ------------------------------------------------------------------ 内部辅助
 
     def _ensure_bare(self, repo: RepoConfig) -> Path:
@@ -110,6 +126,8 @@ class GitProvider:
         # git 命令里的路径参数如果同时用相对路径，git 会把目标路径
         # 再相对 cwd 解析一遍，导致双重嵌套。
         bare = self._default_bare(repo.repo_id).resolve()
+        headers = self._auth_args(repo)
+        env = self._command_env()
         if bare.is_dir() and (bare / "HEAD").is_file():
             # 已有 bare 仓库：确保 remote-tracking refs 已建好，这样
             # `git rev-parse origin/<branch>` 才能工作。
@@ -119,6 +137,8 @@ class GitProvider:
                     ["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
                     cwd=bare,
                     retryable=True,
+                    extra_args=headers,
+                    env=env,
                 )
             return bare
         # 残留半空目录：清掉再 clone
@@ -126,9 +146,11 @@ class GitProvider:
             shutil.rmtree(bare)
         bare.parent.mkdir(parents=True, exist_ok=True)
         self._run(
-            ["clone", "--bare", "--no-tags", repo.url, str(bare)],
+            ["clone", "--bare", "--no-tags", self._effective_url(repo), str(bare)],
             cwd=bare.parent,
             retryable=True,
+            extra_args=headers,
+            env=env,
         )
         # clone --bare 后还需要建立 remote-tracking refs，
         # 否则后续 `git rev-parse origin/<branch>` 会找不到。
@@ -136,6 +158,8 @@ class GitProvider:
             ["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
             cwd=bare,
             retryable=True,
+            extra_args=headers,
+            env=env,
         )
         return bare
 
@@ -145,8 +169,12 @@ class GitProvider:
         *,
         cwd: Path,
         retryable: bool = False,
+        extra_args: list[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> str:
-        return self._run_bytes(args, cwd=cwd, retryable=retryable).decode("utf-8", errors="replace")
+        return self._run_bytes(
+            args, cwd=cwd, retryable=retryable, extra_args=extra_args, env=env
+        ).decode("utf-8", errors="replace")
 
     def _run_bytes(
         self,
@@ -154,8 +182,13 @@ class GitProvider:
         *,
         cwd: Path,
         retryable: bool = False,
+        extra_args: list[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> bytes:
-        cmd = [self._git, *args]
+        cmd = [self._git, *(extra_args or []), *args]
+        run_env: dict[str, str] | None = None
+        if env is not None:
+            run_env = {**os.environ, **env}
         try:
             result = subprocess.run(
                 cmd,
@@ -163,6 +196,7 @@ class GitProvider:
                 check=False,
                 capture_output=True,
                 timeout=10 * 60,
+                env=run_env,
             )
         except subprocess.TimeoutExpired as exc:
             raise (

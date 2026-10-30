@@ -1,5 +1,5 @@
 repo_id: cuphy
-provider: git
+provider: github
 url: https://github.com/NVIDIA/aerial-cuda-accelerated-ran.git
 branch: main
 root: cuPHY
