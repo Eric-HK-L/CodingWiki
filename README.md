@@ -34,3 +34,7 @@ uv pip install -r requirements.lock
 # 检查工作区是否干净
 git status --porcelain
 ```
+
+## 许可证
+
+本项目使用 MIT 许可证，详见 [LICENSE](LICENSE)。
