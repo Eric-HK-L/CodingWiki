@@ -12,6 +12,10 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from codingwiki.retrieval import HybridSearcher
 
 from codingwiki import __version__
 from codingwiki.config import load_config, load_repo_config
@@ -108,6 +112,28 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = wiki_subcommands.add_parser("status", help="Wiki 质量看板摘要")
     status_parser.add_argument("--repo", required=True, help="仓库 ID")
     status_parser.set_defaults(handler=_cmd_wiki_status)
+
+    index_parser = subcommands.add_parser("index", help="检索索引（S5）")
+    index_subcommands = index_parser.add_subparsers(dest="index_command", required=True)
+    index_build_parser = index_subcommands.add_parser(
+        "build", help="从最新事实 + 当前 Wiki 版本构建索引"
+    )
+    index_build_parser.add_argument("--repo", required=True, help="仓库 ID")
+    index_build_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    index_build_parser.add_argument("--workdir", default="", help="覆盖工作树路径")
+    index_build_parser.set_defaults(handler=_cmd_index_build)
+
+    search_parser = subcommands.add_parser("search", help="混合检索：BM25 + 向量 + RRF（S5）")
+    search_parser.add_argument("--repo", required=True, help="仓库 ID")
+    search_parser.add_argument("--query", required=True, help="查询文本")
+    search_parser.add_argument("--top-k", type=int, default=10, help="返回条数")
+    search_parser.set_defaults(handler=_cmd_search)
+
+    ask_parser = subcommands.add_parser("ask", help="带来源出处的问答（S5）")
+    ask_parser.add_argument("--repo", required=True, help="仓库 ID")
+    ask_parser.add_argument("--question", required=True, help="问题文本")
+    ask_parser.add_argument("--top-k", type=int, default=8, help="检索资料条数")
+    ask_parser.set_defaults(handler=_cmd_ask)
 
     return parser
 
@@ -441,6 +467,83 @@ def _cmd_wiki_status(args: argparse.Namespace) -> int:
             print("页面状态: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
             evidence = sum(p.evidence_count for p in index.pages)
             print(f"证据总数: {evidence}（出处有效率 100%，校验器已逐条核对）")
+    return int(ExitCode.OK)
+
+
+# ---------------------------------------------------------------- S5 检索与问答
+
+
+def _cmd_index_build(args: argparse.Namespace) -> int:
+    from codingwiki.publish import FilesystemPageStore
+    from codingwiki.retrieval import Bm25Index, ChunkBuilder, FilesystemIndexStore, HashEmbedding
+
+    facts = _load_facts_or_raise(args.repo)
+    workdir = _wiki_workdir(args.repo, args.config_dir, args.workdir)
+    wiki_pages = FilesystemPageStore(args.repo).load_published_pages()
+
+    chunks = ChunkBuilder(workdir).build(facts, wiki_pages)
+    if not chunks:
+        raise InputError(f"仓库 {args.repo} 没有任何可索引的内容")
+
+    embedder = HashEmbedding()
+    texts = [f"{c.title}\n{c.text}" for c in chunks]
+    vocab_size = Bm25Index(texts).vocab_size
+    vectors = embedder.embed(texts)
+
+    store = FilesystemIndexStore(args.repo)
+    meta = store.save(chunks, vectors, embedder.name, embedder.dim, vocab_size)
+    tiers: dict[str, int] = {}
+    for chunk in chunks:
+        tiers[chunk.trust_tier] = tiers.get(chunk.trust_tier, 0) + 1
+    tier_text = ", ".join(f"{k}={v}" for k, v in sorted(tiers.items()))
+    print(
+        f"索引就绪: index_id={meta.index_id}, snapshot={meta.snapshot_id}, "
+        f"chunks={meta.chunk_count}（{tier_text}）, dim={meta.dim}, model={meta.embedding_model}"
+    )
+    if not wiki_pages:
+        print("提示: 尚未发布 Wiki 版本，索引只含代码与事实块；wiki publish 后重建可补齐")
+    return int(ExitCode.OK)
+
+
+def _load_searcher(repo_id: str) -> HybridSearcher:
+    from codingwiki.retrieval import FilesystemIndexStore, HashEmbedding, HybridSearcher
+
+    store = FilesystemIndexStore(repo_id)
+    meta, chunks, vectors = store.load()
+    embedder = HashEmbedding(dim=meta.dim)
+    if embedder.name != meta.embedding_model:
+        raise InputError(
+            f"索引由模型 {meta.embedding_model} 构建，当前默认模型为 {embedder.name}；"
+            "请重新执行 codingwiki index build"
+        )
+    return HybridSearcher(chunks, vectors, embedder)
+
+
+def _cmd_search(args: argparse.Namespace) -> int:
+    searcher = _load_searcher(args.repo)
+    hits = searcher.search(args.query, top_k=max(args.top_k, 1))
+    if not hits:
+        print("没有匹配的资料")
+        return int(ExitCode.OK)
+    for rank, hit in enumerate(hits, start=1):
+        chunk = hit.chunk
+        print(f"{rank}. [{chunk.trust_tier}] {hit.reference}  score={hit.score:.4f}  {chunk.title}")
+    return int(ExitCode.OK)
+
+
+def _cmd_ask(args: argparse.Namespace) -> int:
+    from codingwiki.backends import MockBackend
+    from codingwiki.retrieval import AnswerPipeline
+
+    searcher = _load_searcher(args.repo)
+    pipeline = AnswerPipeline(backend=MockBackend(), searcher=searcher)
+    outcome = pipeline.ask(args.repo, args.question, top_k=max(args.top_k, 1))
+    print(outcome.answer)
+    if not outcome.refused:
+        print(
+            f"---\nconfidence={outcome.result.confidence}  "
+            f"citations={len(outcome.result.citations)}  attempts={outcome.attempts}"
+        )
     return int(ExitCode.OK)
 
 

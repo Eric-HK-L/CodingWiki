@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ FAIL_BAD_EVIDENCE_REF = "bad_evidence_ref"  # claim 引用不存在的 E 编号
 FAIL_MISSING_TITLE = "missing_title"  # front matter 缺 title
 FAIL_FUZZY_WORD = "fuzzy_word"  # 正文混入无依据模糊词
 FAIL_BAD_JSON = "bad_json"  # result.json 写成非法 JSON
+FAIL_BAD_CITATION = "bad_citation"  # ask：引用不存在的 S 编号
 
 
 class MockBackend:
@@ -46,6 +48,8 @@ class MockBackend:
 
     def run(self, packet: TaskPacket) -> BackendResult:
         started = time.monotonic()
+        if (packet.workspace / "context" / "question.txt").is_file():
+            return self._run_ask(packet, started)
         try:
             meta = TaskMeta.model_validate_json(
                 (packet.workspace / "meta.json").read_text(encoding="utf-8")
@@ -86,6 +90,82 @@ class MockBackend:
                 error=f"生成失败: {exc}",
             )
 
+        outputs = sorted(
+            str(p.relative_to(packet.workspace)) for p in packet.output_dir.iterdir() if p.is_file()
+        )
+        return BackendResult(
+            status=BackendStatus.SUCCEEDED,
+            exit_code=0,
+            output_files=outputs,
+            duration_ms=_elapsed_ms(started),
+            tokens_in=_rough_tokens(packet.workspace),
+            tokens_out=_rough_tokens(packet.output_dir),
+            model=MODEL_NAME,
+        )
+
+    # ---------------------------------------------------------------- 问答组装
+
+    def _run_ask(self, packet: TaskPacket, started: float) -> BackendResult:
+        """问答模式：模板化组装"直接答案 + 逐条引用"，引用全部来自 passages。"""
+        try:
+            question = (
+                (packet.workspace / "context" / "question.txt").read_text(encoding="utf-8").strip()
+            )
+            passages = json.loads(
+                (packet.workspace / "context" / "passages.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            return BackendResult(
+                status=BackendStatus.FAILED,
+                duration_ms=_elapsed_ms(started),
+                model=MODEL_NAME,
+                error=f"问答任务包不可读: {exc}",
+            )
+
+        attempt = int(packet.metadata.get("attempt", "1"))
+        failure = self._failures.get(attempt)
+        sids = [str(p["sid"]) for p in passages]
+        citations = list(sids)
+        if failure == FAIL_BAD_CITATION:
+            citations.append("S999")
+
+        lines = [
+            f"关于「{question}」：",
+            "",
+        ]
+        if passages:
+            first = passages[0]
+            lines.append(
+                f"最相关的资料是 `{first.get('title') or first['reference']}`"
+                f"（{first['reference']}）。[S1]"
+            )
+            lines.append("")
+            lines.append("依据：")
+            for p in passages:
+                lines.append(f"- {p['reference']}（信任层级 {p['trust_tier']}）。[{p['sid']}]")
+            if failure == FAIL_BAD_CITATION:
+                lines.append("- 另见不存在来源的资料。[S999]")
+        else:
+            lines.append("根据现有资料无法确认。")
+        answer = "\n".join(lines) + "\n"
+
+        result = {
+            "question": question,
+            "answer_type": "answered" if passages else "refused",
+            "citations": citations,
+            "confidence": "high" if len(sids) >= 2 else "medium",
+            "unsupported": [],
+            "followups": [],
+        }
+
+        packet.output_dir.mkdir(parents=True, exist_ok=True)
+        (packet.output_dir / "answer.md").write_text(answer, encoding="utf-8")
+        if failure == FAIL_BAD_JSON:
+            (packet.output_dir / "result.json").write_text("{ 不是合法 JSON", encoding="utf-8")
+        else:
+            (packet.output_dir / "result.json").write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         outputs = sorted(
             str(p.relative_to(packet.workspace)) for p in packet.output_dir.iterdir() if p.is_file()
         )
@@ -337,6 +417,7 @@ def _rough_tokens(path: Path) -> int:
 
 __all__ = [
     "BACKEND_NAME",
+    "FAIL_BAD_CITATION",
     "FAIL_BAD_EVIDENCE_REF",
     "FAIL_BAD_JSON",
     "FAIL_FUZZY_WORD",
