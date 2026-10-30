@@ -15,6 +15,7 @@ from codingwiki.domain.models import (
     ChangeSet,
     FileEntry,
     Manifest,
+    RepoConfig,
     RepoType,
     Snapshot,
 )
@@ -40,10 +41,11 @@ class FilesystemSnapshotStore:
         revision: str,
         workdir: Path,
         provider: RepoType,
+        config: RepoConfig | None = None,
     ) -> Snapshot:
 
-        # 用仓库级默认构造填充 repo_config 上下文
-        # 避免 create 签名里塞 RepoConfig：保持 Protocol 简洁
+        # 仓库级配置可选：传了就按 config 的排除/语言覆盖/大小上限走，
+        # 不传则保持 S2 的默认行为（便于旧调用方和测试）。
         from codingwiki.snapshot._exclude import (
             detect_language,
             is_binary_by_extension,
@@ -55,6 +57,11 @@ class FilesystemSnapshotStore:
         if not workdir.is_dir():
             raise InternalError(f"workdir 不存在或不是目录: {workdir}")
 
+        extra_excludes = config.excludes if config else []
+        language_overrides = config.language_overrides if config else {}
+        extra_binary_ext = _extra_binary_extensions(config)
+        max_bytes = config.max_text_file_size_kb * 1024 if config else _env_max_bytes()
+
         snapshot_id = f"{repo_id}@{revision}"
 
         # 找 parent snapshot
@@ -65,11 +72,6 @@ class FilesystemSnapshotStore:
         files: list[FileEntry] = []
         exclusions: list[dict[str, str]] = []
         languages: dict[str, int] = {}
-        max_bytes = 0
-        try:
-            max_bytes = _default_max_bytes()
-        except Exception:
-            max_bytes = 2048 * 1024
 
         for file_path in _iter_files(workdir):
             rel = str(file_path.relative_to(workdir)).replace(os.sep, "/")
@@ -92,14 +94,14 @@ class FilesystemSnapshotStore:
                 continue
 
             # 先算 binary 和 language（即使文件被排除，标记也要准确）
-            binary = is_binary_by_extension(rel)
+            binary = is_binary_by_extension(rel, extra_binary_ext)
             if not binary:
                 binary = not looks_text_by_content(file_path)
-            language = detect_language(rel)
+            language = detect_language(rel, language_overrides)
             size = file_path.stat().st_size
 
             # 排除规则
-            excluded, reason = should_exclude(rel)
+            excluded, reason = should_exclude(rel, extra_rules=extra_excludes)
             if excluded:
                 files.append(
                     FileEntry(
@@ -198,6 +200,22 @@ class FilesystemSnapshotStore:
 
     def latest(self, repo_id: str) -> Snapshot | None:
         return self._latest_snapshot(repo_id)
+
+    def manifest_path(self, snapshot_id: str) -> Path:
+        repo_id, _, _ = snapshot_id.partition("@")
+        return self._manifest_path(repo_id, snapshot_id)
+
+    def snapshot(self, snapshot_id: str) -> Snapshot:
+        """按 manifest 重建 Snapshot（manifest 是唯一权威来源）。"""
+        manifest = self.manifest(snapshot_id)
+        return Snapshot(
+            snapshot_id=manifest.snapshot_id,
+            repo_id=manifest.repo_id,
+            revision=manifest.revision,
+            provider=manifest.provider,
+            manifest_path=str(self.manifest_path(snapshot_id)),
+            parent_snapshot_id=manifest.parent_snapshot_id,
+        )
 
     def diff_manifests(self, old_id: str, new_id: str) -> ChangeSet:
         old = self.manifest(old_id)
@@ -317,6 +335,23 @@ def _safe_readlink(path: Path) -> str:
 
 def _default_max_bytes() -> int:
     return int(os.environ.get("CODINGWIKI_MAX_TEXT_KB", "2048")) * 1024
+
+
+def _env_max_bytes() -> int:
+    try:
+        return _default_max_bytes()
+    except ValueError:
+        return 2048 * 1024
+
+
+def _extra_binary_extensions(config: RepoConfig | None) -> frozenset[str]:
+    """把配置里的扩展名统一成带点的小写形式；空配置返回空集合。"""
+    if config is None:
+        return frozenset()
+    return frozenset(
+        ext.lower() if ext.startswith(".") else f".{ext.lower()}"
+        for ext in config.binary_extensions
+    )
 
 
 def _diff_two(old: Manifest, new: Manifest) -> ChangeSet:

@@ -1,0 +1,8 @@
+engine:
+  name: sample
+  threads: 4
+  features:
+    - turbo
+    - fast_math
+logging:
+  level: info

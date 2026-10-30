@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from codingwiki.domain.models import ChangeSet, Manifest, RepoType, Snapshot
+from codingwiki.domain.models import ChangeSet, Manifest, RepoConfig, RepoType, Snapshot
 
 
 @runtime_checkable
@@ -21,6 +21,7 @@ class SnapshotStore(Protocol):
         revision: str,
         workdir: Path,
         provider: RepoType,
+        config: RepoConfig | None = None,
     ) -> Snapshot: ...
 
     def manifest(self, snapshot_id: str) -> Manifest: ...
