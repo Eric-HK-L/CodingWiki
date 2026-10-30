@@ -104,6 +104,25 @@ def test_wiki_full_flow_end_to_end(tmp_path: Path) -> None:
     assert publish.returncode == 0, publish.stderr
     assert "发布成功" in publish.stdout
     assert "verified=" in publish.stdout
+    assert "站点:" in publish.stdout
+
+    site = tmp_path / ".cw" / "wiki" / "sample"
+    version = (site / "current").read_text(encoding="utf-8").strip()
+    index_html = site / "versions" / version / "site" / "index.html"
+    assert index_html.is_file()
+    assert (index_html.parent / "pages" / "module" / "src.html").is_file()
+    text = index_html.read_text(encoding="utf-8")
+    assert "pages/module/src.html" in text
+    assert "search.js" in text
+
+    # 嵌套目录下的源码页必须能从自身位置解析回 style.css 与首页
+    source_page = index_html.parent / "source" / "src" / "main.cu.html"
+    assert source_page.is_file()
+    source_text = source_page.read_text(encoding="utf-8")
+    css_href = 'href="../../style.css"'
+    home_href = 'href="../../index.html"'
+    assert css_href in source_text
+    assert home_href in source_text
 
     status = _run(["wiki", "status", "--repo", "sample"], cwd=tmp_path, env=env)
     assert status.returncode == 0, status.stderr

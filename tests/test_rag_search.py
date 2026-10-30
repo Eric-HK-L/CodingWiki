@@ -97,3 +97,33 @@ def test_min_vector_score_scales_with_corpus_size() -> None:
     big = _searcher([_chunk(f"c{i}", "t", "x") for i in range(30000)])
     assert big.min_vector_score() > small.min_vector_score()
     assert 0.0 < small.min_vector_score() < 1.0
+
+
+class _FakeReranker:
+    """把含 answer 的段落打到最高分，用于验证重排确实改变最终顺序。"""
+
+    @property
+    def name(self) -> str:
+        return "fake-reranker"
+
+    def score(self, query: str, passages: list[str]) -> list[float]:
+        return [1.0 if "answer" in passage else 0.0 for passage in passages]
+
+
+def test_reranker_reorders_fused_candidates() -> None:
+    chunks = [
+        _chunk("c1", "alpha alpha", "alpha alpha alpha 关键词密集但无答案"),
+        _chunk("c2", "alpha answer", "alpha answer 命中重排"),
+    ]
+    embedder = HashEmbedding()
+    texts = [f"{c.title}\n{c.text}" for c in chunks]
+    searcher = HybridSearcher(
+        chunks,
+        embedder.embed(texts),
+        embedder,
+        reranker=_FakeReranker(),
+        rerank_pool=5,
+    )
+    hits = searcher.search("alpha", top_k=2)
+    assert hits[0].chunk.chunk_id == "c2"
+    assert hits[0].rerank_score == 1.0

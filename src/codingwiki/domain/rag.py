@@ -63,6 +63,8 @@ class SearchHit(_WikiModel):
     bm25_rank: int = 0  # 0 表示未进入 BM25 榜单
     vector_rank: int = 0  # 0 表示未进入向量榜单
     vector_score: float = 0.0  # 原始余弦相似度（未入榜为 0）
+    rrf_score: float = 0.0  # RRF 融合分（重排前的排序依据）
+    rerank_score: float = 0.0  # cross-encoder 相关分（未重排为 0）
 
     @property
     def reference(self) -> str:

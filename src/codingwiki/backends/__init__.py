@@ -1,5 +1,6 @@
 """模型后端包：统一 Protocol + 各实现。"""
 
+from codingwiki.backends.api import ApiBackend
 from codingwiki.backends.mock import MockBackend
 from codingwiki.backends.protocol import (
     BackendResult,
@@ -9,6 +10,7 @@ from codingwiki.backends.protocol import (
 )
 
 __all__ = [
+    "ApiBackend",
     "BackendResult",
     "BackendStatus",
     "MockBackend",

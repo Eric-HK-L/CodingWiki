@@ -53,12 +53,16 @@ class GeneratePipeline:
         verifier: PageVerifier,
         store: FilesystemPageStore,
         max_rounds: int = 3,
+        backend_name: str = "mock",
+        model_name: str = "",
     ) -> None:
         self._backend = backend
         self._builder = builder
         self._verifier = verifier
         self._store = store
         self._max_rounds = max(1, max_rounds)
+        self._backend_name = backend_name
+        self._model_name = model_name
 
     def run_task(
         self,
@@ -155,8 +159,8 @@ class GeneratePipeline:
             symbols=symbols,
             evidence_ids=[ev.id for ev in meta.evidence],
             prompt_version=meta.prompt_version,
-            backend="mock",
-            model="",
+            backend=self._backend_name,
+            model=self._model_name,
         )
 
 

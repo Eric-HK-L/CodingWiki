@@ -16,6 +16,7 @@ from codingwiki.domain.front_matter import parse_front_matter
 from codingwiki.domain.wiki import (
     PageMeta,
     PageResult,
+    PageType,
     TaskMeta,
     VerifyIssue,
     VerifyReport,
@@ -25,12 +26,76 @@ from codingwiki.errors import InputError
 VERIFIER_VERSION = "verify-v1"
 
 _FUZZY_WORDS = ("大概", "应该是", "也许", "据说")
+_PLACEHOLDER_PHRASES = (
+    "详细语义需人工评审",
+    "以签名为准",
+    "详见代码",
+    "相关处理",
+    "大概",
+    "可能",
+)
 _EVIDENCE_REF = re.compile(r"\[(E\d+)\]")
 _INTERNAL_LINK = re.compile(
-    r"\[[^\]]*\]\(((?:module|interface|flow|config|build|test|overview|home|glossary|howto|adr|file)/[^)\s]+)\)"
+    r"\[[^\]]*\]\(((?:module|interface|flow|config|build|test|overview|home|architecture|glossary|howto|adr|file)/[^)\s]+)\)"
 )
 _BODY_MIN_CHARS = 200
 _BODY_MAX_CHARS = 8000
+_READABLE_FLOORS = {
+    PageType.MODULE: 600,
+    PageType.OVERVIEW: 800,
+    PageType.ARCHITECTURE: 800,
+    PageType.HOME: 400,
+    PageType.INTERFACE: 300,
+    PageType.FLOW: 400,
+    PageType.CONFIG: 300,
+    PageType.BUILD: 300,
+    PageType.TEST: 300,
+    PageType.GLOSSARY: 300,
+}
+_REQUIRED_SECTIONS: dict[PageType, tuple[tuple[str, ...], ...]] = {
+    PageType.MODULE: (
+        ("职责边界",),
+        ("关键数据结构", "关键结构"),
+        ("对外入口", "公共入口"),
+        ("依赖与影响", "依赖"),
+        ("出处",),
+    ),
+    PageType.OVERVIEW: (
+        ("项目画像", "项目概览", "概览"),
+        ("架构分层", "架构"),
+        ("核心模块", "模块"),
+        ("出处",),
+    ),
+    PageType.ARCHITECTURE: (
+        ("分层",),
+        ("模块关系", "模块"),
+        ("关键约束", "约束"),
+        ("典型调用链", "调用链"),
+        ("出处",),
+    ),
+    PageType.HOME: (
+        ("导航",),
+        ("仓库画像", "画像", "概览"),
+        ("出处",),
+    ),
+    PageType.INTERFACE: (
+        ("公共入口", "对外入口", "签名"),
+        ("参数与返回", "参数"),
+        ("调用方", "依赖"),
+        ("出处",),
+    ),
+    PageType.FLOW: (
+        ("触发入口", "入口"),
+        ("步骤", "流程"),
+        ("关键数据结构", "结构"),
+        ("出处",),
+    ),
+    PageType.CONFIG: (("配置项", "配置"), ("影响范围", "默认值"), ("出处",)),
+    PageType.BUILD: (("构建系统", "构建"), ("主要目标", "目标"), ("运行入口", "运行"), ("出处",)),
+    PageType.TEST: (("测试框架", "框架"), ("主要测试", "测试"), ("运行方式", "运行"), ("出处",)),
+    PageType.GLOSSARY: (("术语",), ("出处",)),
+}
+_HEADING = re.compile(r"^##\s+(.+)$", re.MULTILINE)
 
 
 class PageVerifier:
@@ -64,6 +129,8 @@ class PageVerifier:
             issues += self._check_meta_consistency(page_meta, meta)
         if body is not None:
             issues += self._check_content(body)
+            if meta.quality_profile == "readable":
+                issues += self._check_readable_quality(body, meta)
         return self._report(meta.page_id, issues, page_text, result_text)
 
     # ---------------------------------------------------------------- 格式与结构
@@ -262,6 +329,65 @@ class PageVerifier:
         return issues
 
     # ---------------------------------------------------------------- 内容
+
+    def _check_readable_quality(self, body: str, meta: TaskMeta) -> list[VerifyIssue]:
+        """人可读页面的质量门（架构文档 v0.7 §17.3）：结构、字数、密度、占位语。"""
+        issues: list[VerifyIssue] = []
+        plain = _strip_code_and_evidence(body)
+        headings = _HEADING.findall(body)
+        for alternatives in _REQUIRED_SECTIONS.get(meta.page_type, ()):
+            if not any(word in heading for heading in headings for word in alternatives):
+                issues.append(
+                    VerifyIssue(
+                        rule="required_section_missing",
+                        message=f"缺少必需结构段：{' / '.join(alternatives)}",
+                        suggestion=f"补上「## {alternatives[0]}」段并写实质内容",
+                    )
+                )
+
+        floor = _READABLE_FLOORS.get(meta.page_type, 300)
+        length = len(plain)
+        if length < floor:
+            issues.append(
+                VerifyIssue(
+                    rule="readable_body_too_short",
+                    message=f"{meta.page_type.value} 页正文 {length} 字，低于下限 {floor} 字",
+                    suggestion="补充职责边界、关键结构与依赖关系，不要只列符号",
+                )
+            )
+
+        refs = len(_EVIDENCE_REF.findall(plain))
+        required = (length + 199) // 200
+        if refs < required:
+            issues.append(
+                VerifyIssue(
+                    rule="evidence_density_low",
+                    message=f"正文 {length} 字只有 {refs} 个 [E]，要求至少 {required} 个",
+                    suggestion="为每段结论补 [E编号]，或删掉没有证据的泛泛描述",
+                )
+            )
+
+        for phrase in _PLACEHOLDER_PHRASES:
+            if phrase in plain:
+                issues.append(
+                    VerifyIssue(
+                        rule="placeholder_phrase",
+                        message=f"正文出现占位语「{phrase}」",
+                        suggestion="改成具体职责/调用/数据结构描述；没有证据就写入未确认事项",
+                    )
+                )
+
+        if meta.page_type is PageType.MODULE:
+            one_liner = next((line for line in body.splitlines() if "一句话职责" in line), "")
+            if "包含" in one_liner and "符号" in one_liner:
+                issues.append(
+                    VerifyIssue(
+                        rule="responsibility_boilerplate",
+                        message="一句话职责写成了「包含 N 个符号」，没有说明解决什么问题",
+                        suggestion="改成「本模块负责 …，为 … 提供 …」的职责句",
+                    )
+                )
+        return issues
 
     def _check_content(self, body: str) -> list[VerifyIssue]:
         issues: list[VerifyIssue] = []

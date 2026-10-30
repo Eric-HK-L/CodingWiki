@@ -15,13 +15,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from codingwiki.backends.protocol import ModelBackend
     from codingwiki.retrieval import HybridSearcher
 
 from codingwiki import __version__
 from codingwiki.config import load_config, load_repo_config
+from codingwiki.config.models import AppConfig, EmbeddingSettings
 from codingwiki.domain.facts import RepoFacts
 from codingwiki.domain.models import RepoConfig, Snapshot
-from codingwiki.errors import CodingWikiError, ExitCode, InputError, InternalError
+from codingwiki.errors import (
+    CodingWikiError,
+    EnvironmentIssue,
+    ExitCode,
+    InputError,
+    InternalError,
+)
 from codingwiki.facts import FilesystemFactExtractor, FilesystemFactStore
 from codingwiki.logging_setup import configure_logging, get_logger
 from codingwiki.providers import create_provider
@@ -96,6 +104,17 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--max-rounds", type=int, default=3, help="单页最大修复轮数")
     generate_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
     generate_parser.add_argument("--workdir", default="", help="覆盖工作树路径")
+    generate_parser.add_argument(
+        "--backend",
+        choices=["mock", "api"],
+        default="mock",
+        help="模型后端：mock=CI 地板；api=OpenAI 兼容真实模型",
+    )
+    generate_parser.add_argument(
+        "--app-config",
+        default="configs/default.yaml",
+        help="主配置路径（--backend api 时读取 model.api 段；本机私有配置放 configs/*.local.yaml）",
+    )
     generate_parser.set_defaults(handler=_cmd_wiki_generate)
 
     verify_parser = wiki_subcommands.add_parser("verify", help="复验草稿区全部页面")
@@ -121,18 +140,40 @@ def build_parser() -> argparse.ArgumentParser:
     index_build_parser.add_argument("--repo", required=True, help="仓库 ID")
     index_build_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
     index_build_parser.add_argument("--workdir", default="", help="覆盖工作树路径")
+    index_build_parser.add_argument(
+        "--app-config",
+        default="",
+        help="主配置路径（embedding 参数来源）；为空时用内置默认（local/bge-m3）",
+    )
+    index_build_parser.add_argument(
+        "--embedding",
+        choices=["hash", "bge-m3", "local"],
+        default="",
+        help="覆盖配置里的嵌入后端；hash=离线占位，bge-m3/local=真实语义模型",
+    )
+    index_build_parser.add_argument("--model-path", default="", help="覆盖嵌入模型目录")
+    index_build_parser.add_argument(
+        "--device", choices=["auto", "cpu", "mps", "cuda"], default="", help="覆盖推理设备"
+    )
+    index_build_parser.add_argument("--batch-size", type=int, default=0, help="覆盖批大小")
+    index_build_parser.add_argument("--max-length", type=int, default=0, help="覆盖最大序列长度")
+    index_build_parser.add_argument("--dim", type=int, default=0, help="覆盖向量维度")
     index_build_parser.set_defaults(handler=_cmd_index_build)
 
     search_parser = subcommands.add_parser("search", help="混合检索：BM25 + 向量 + RRF（S5）")
     search_parser.add_argument("--repo", required=True, help="仓库 ID")
     search_parser.add_argument("--query", required=True, help="查询文本")
     search_parser.add_argument("--top-k", type=int, default=10, help="返回条数")
+    search_parser.add_argument("--app-config", default="", help="主配置路径（模型/重排参数来源）")
+    search_parser.add_argument("--no-rerank", action="store_true", help="关闭 cross-encoder 重排")
     search_parser.set_defaults(handler=_cmd_search)
 
     ask_parser = subcommands.add_parser("ask", help="带来源出处的问答（S5）")
     ask_parser.add_argument("--repo", required=True, help="仓库 ID")
     ask_parser.add_argument("--question", required=True, help="问题文本")
     ask_parser.add_argument("--top-k", type=int, default=8, help="检索资料条数")
+    ask_parser.add_argument("--app-config", default="", help="主配置路径（模型/重排参数来源）")
+    ask_parser.add_argument("--no-rerank", action="store_true", help="关闭 cross-encoder 重排")
     ask_parser.set_defaults(handler=_cmd_ask)
 
     return parser
@@ -364,9 +405,63 @@ def _cmd_wiki_plan(args: argparse.Namespace) -> int:
     return int(ExitCode.OK)
 
 
+def _resolve_wiki_backend(
+    args: argparse.Namespace,
+) -> tuple[ModelBackend, str, str]:
+    """按 --backend 构造后端；API 缺配置时报可操作错误，绝不静默退回 mock。"""
+    if args.backend == "mock":
+        from codingwiki.backends import MockBackend
+        from codingwiki.backends.mock import BACKEND_NAME, MODEL_NAME
+
+        return MockBackend(), BACKEND_NAME, MODEL_NAME
+
+    from codingwiki.backends import ApiBackend
+
+    config = load_config(args.app_config)
+    api = config.model.api
+    problems: list[str] = []
+    if not api.enabled:
+        problems.append("model.api.enabled 为 false")
+    if not api.base_url.strip():
+        problems.append("model.api.base_url 为空")
+    if not api.model.strip():
+        problems.append("model.api.model 为空")
+    if problems:
+        raise InputError(
+            "无法启动 API 后端：\n"
+            + "\n".join(f"- {p}" for p in problems)
+            + "\n修法：复制 configs/default.yaml 到已 gitignore 的 configs/api.local.yaml，"
+            "填写 model.api.base_url/model/api_key_file，然后用 "
+            "--backend api --app-config configs/api.local.yaml"
+        )
+
+    if api.api_key_file:
+        key_path = Path(api.api_key_file).expanduser()
+        if not key_path.is_file():
+            raise EnvironmentIssue(
+                f"API 密钥文件不存在: {key_path}；"
+                "请检查 model.api.api_key_file（只写路径，不读内容）"
+            )
+    elif not os.environ.get(api.api_key_env, "").strip():
+        raise EnvironmentIssue(
+            f"未找到 API 密钥：请配置 model.api.api_key_file，或设置环境变量 {api.api_key_env}"
+        )
+
+    backend = ApiBackend(
+        base_url=api.base_url,
+        model=api.model,
+        api_key_file=api.api_key_file,
+        api_key_env=api.api_key_env,
+        timeout_s=api.timeout_s,
+        max_retries=api.max_retries,
+        temperature=api.temperature,
+        max_tokens=api.max_tokens,
+    )
+    return backend, "api", api.model
+
+
 def _cmd_wiki_generate(args: argparse.Namespace) -> int:
     logger = get_logger("cli.wiki_generate")
-    from codingwiki.backends import MockBackend
     from codingwiki.generate import CoveragePlanner, GeneratePipeline, TaskPackageBuilder
     from codingwiki.publish import FilesystemPageStore
     from codingwiki.verify import PageVerifier
@@ -374,15 +469,18 @@ def _cmd_wiki_generate(args: argparse.Namespace) -> int:
     facts = _load_facts_or_raise(args.repo)
     workdir = _wiki_workdir(args.repo, args.config_dir, args.workdir)
     store = FilesystemPageStore(args.repo)
+    backend, backend_name, model_name = _resolve_wiki_backend(args)
     plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps())
 
     known_pages = {t.page_id for t in plan.tasks} | set(store.list_drafts())
     pipeline = GeneratePipeline(
-        backend=MockBackend(),
+        backend=backend,
         builder=TaskPackageBuilder(workdir),
         verifier=PageVerifier(facts, workdir, known_pages=known_pages),
         store=store,
         max_rounds=args.max_rounds,
+        backend_name=backend_name,
+        model_name=model_name,
     )
     outcomes = pipeline.run_plan(plan, facts)
 
@@ -438,13 +536,25 @@ def _cmd_wiki_publish(args: argparse.Namespace) -> int:
     from codingwiki.publish import FilesystemPageStore
 
     facts = _load_facts_or_raise(args.repo)
+    workdir = _wiki_workdir(args.repo, args.config_dir, "")
     store = FilesystemPageStore(args.repo)
-    index = store.publish(facts.snapshot_id)
+    profile: dict[str, object] = {
+        "files": len(facts.files),
+        "symbols": facts.symbol_count,
+        "calls": facts.call_count,
+        "modules": len({file.module for file in facts.files}),
+        "build_targets": len(facts.build_targets),
+        "tests": len(facts.tests),
+        "config_facts": len(facts.config_facts),
+    }
+    index = store.publish(facts.snapshot_id, workdir=workdir, site_profile=profile)
     counts = index.status_counts
+    site = store.version_dir(index.version_id) / "site" / "index.html"
     print(
         f"发布成功: version={index.version_id}, pages={len(index.pages)}, "
         f"verified={counts.get('verified', 0)}"
     )
+    print(f"站点: {site}（离线打开 index.html，首页 2 次点击可达模块页）")
     return int(ExitCode.OK)
 
 
@@ -473,9 +583,33 @@ def _cmd_wiki_status(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- S5 检索与问答
 
 
+def _app_config_or_default(path: str) -> AppConfig:
+    """读取主配置；未指定路径时用内置默认（embedding=local，重排关闭）。"""
+    if path:
+        return load_config(path)
+    return AppConfig(config_version="1.0", embedding=EmbeddingSettings())
+
+
+def _embed_progress(total_hint: int = 0) -> Callable[[int, int], None]:
+    """把嵌入进度按 5% 粒度打到 stdout，便于长任务观察。"""
+    last_bucket = [-1]
+
+    def report(done: int, total: int) -> None:
+        effective = total or total_hint
+        if effective <= 0:
+            return
+        bucket = min(20, int(done * 20 / effective))
+        if bucket > last_bucket[0] or done >= effective:
+            last_bucket[0] = bucket
+            print(f"嵌入进度: {done}/{effective} ({done * 100 // effective}%)", flush=True)
+
+    return report
+
+
 def _cmd_index_build(args: argparse.Namespace) -> int:
     from codingwiki.publish import FilesystemPageStore
-    from codingwiki.retrieval import Bm25Index, ChunkBuilder, FilesystemIndexStore, HashEmbedding
+    from codingwiki.retrieval import Bm25Index, ChunkBuilder, FilesystemIndexStore
+    from codingwiki.retrieval.registry import create_embedder
 
     facts = _load_facts_or_raise(args.repo)
     workdir = _wiki_workdir(args.repo, args.config_dir, args.workdir)
@@ -485,7 +619,19 @@ def _cmd_index_build(args: argparse.Namespace) -> int:
     if not chunks:
         raise InputError(f"仓库 {args.repo} 没有任何可索引的内容")
 
-    embedder = HashEmbedding()
+    config = _app_config_or_default(args.app_config)
+    settings = config.embedding
+    backend = args.embedding or settings.backend
+    is_hash = backend.strip().lower() in {"hash", "hash-embed"}
+    embedder = create_embedder(
+        backend,
+        model_path=args.model_path or settings.model_path,
+        device=args.device or settings.device,
+        batch_size=args.batch_size or settings.batch_size,
+        max_length=args.max_length or settings.max_length,
+        dim=args.dim or (0 if is_hash else settings.dimension),
+        progress=_embed_progress(len(chunks)),
+    )
     texts = [f"{c.title}\n{c.text}" for c in chunks]
     vocab_size = Bm25Index(texts).vocab_size
     vectors = embedder.embed(texts)
@@ -505,22 +651,43 @@ def _cmd_index_build(args: argparse.Namespace) -> int:
     return int(ExitCode.OK)
 
 
-def _load_searcher(repo_id: str) -> HybridSearcher:
-    from codingwiki.retrieval import FilesystemIndexStore, HashEmbedding, HybridSearcher
+def _load_searcher(
+    repo_id: str, *, app_config: str = "", no_rerank: bool = False
+) -> HybridSearcher:
+    from codingwiki.retrieval import FilesystemIndexStore, HybridSearcher
+    from codingwiki.retrieval.registry import HASH_PREFIX, create_reranker, embedder_for_name
 
+    config = _app_config_or_default(app_config)
     store = FilesystemIndexStore(repo_id)
     meta, chunks, vectors = store.load()
-    embedder = HashEmbedding(dim=meta.dim)
-    if embedder.name != meta.embedding_model:
-        raise InputError(
-            f"索引由模型 {meta.embedding_model} 构建，当前默认模型为 {embedder.name}；"
-            "请重新执行 codingwiki index build"
+    embedder = embedder_for_name(
+        meta.embedding_model,
+        model_path=config.embedding.model_path,
+        device=config.embedding.device,
+    )
+    reranker = None
+    if config.reranker.enabled and not no_rerank:
+        reranker = create_reranker(
+            model_path=config.reranker.model_path,
+            device=config.reranker.device,
+            batch_size=config.reranker.batch_size,
         )
-    return HybridSearcher(chunks, vectors, embedder)
+    # 哈希后端无语义能力，拒答门槛必须走规模自适应公式（传 None）
+    threshold = (
+        None if meta.embedding_model.startswith(HASH_PREFIX) else config.retrieval.min_vector_score
+    )
+    return HybridSearcher(
+        chunks,
+        vectors,
+        embedder,
+        reranker=reranker,
+        rerank_pool=config.retrieval.rerank_pool,
+        min_vector_score=threshold,
+    )
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
-    searcher = _load_searcher(args.repo)
+    searcher = _load_searcher(args.repo, app_config=args.app_config, no_rerank=args.no_rerank)
     hits = searcher.search(args.query, top_k=max(args.top_k, 1))
     if not hits:
         print("没有匹配的资料")
@@ -535,7 +702,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     from codingwiki.backends import MockBackend
     from codingwiki.retrieval import AnswerPipeline
 
-    searcher = _load_searcher(args.repo)
+    searcher = _load_searcher(args.repo, app_config=args.app_config, no_rerank=args.no_rerank)
     pipeline = AnswerPipeline(backend=MockBackend(), searcher=searcher)
     outcome = pipeline.ask(args.repo, args.question, top_k=max(args.top_k, 1))
     print(outcome.answer)

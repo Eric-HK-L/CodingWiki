@@ -67,12 +67,22 @@ def test_index_search_ask_end_to_end(tmp_path: Path) -> None:
     config_dir, env = _prepare(tmp_path)
 
     build = _run(
-        ["index", "build", "--repo", "sample", "--config-dir", str(config_dir)],
+        [
+            "index",
+            "build",
+            "--repo",
+            "sample",
+            "--config-dir",
+            str(config_dir),
+            "--embedding",
+            "hash",
+        ],
         cwd=tmp_path,
         env=env,
     )
     assert build.returncode == 0, build.stderr
     assert "索引就绪" in build.stdout
+    assert "model=hash-embed-v1-d256" in build.stdout
     assert "wiki=" in build.stdout  # 已发布 Wiki 页进入索引
     # 索引目录落盘
     indices = tmp_path / ".cw" / "indices" / "sample"
@@ -81,11 +91,19 @@ def test_index_search_ask_end_to_end(tmp_path: Path) -> None:
     assert (indices / version / "chunks.jsonl").is_file()
     assert (indices / version / "vectors.bin").is_file()
 
-    search = _run(["search", "--repo", "sample", "--query", "Engine run"], cwd=tmp_path, env=env)
+    search = _run(
+        ["search", "--repo", "sample", "--query", "Engine run", "--no-rerank"],
+        cwd=tmp_path,
+        env=env,
+    )
     assert search.returncode == 0, search.stderr
     assert "Engine" in search.stdout
 
-    ask = _run(["ask", "--repo", "sample", "--question", "Engine 是什么？"], cwd=tmp_path, env=env)
+    ask = _run(
+        ["ask", "--repo", "sample", "--question", "Engine 是什么？", "--no-rerank"],
+        cwd=tmp_path,
+        env=env,
+    )
     assert ask.returncode == 0, ask.stderr
     assert "[S1]" in ask.stdout
     assert "confidence=" in ask.stdout
@@ -110,14 +128,23 @@ def test_search_without_index_exits_with_input_error(tmp_path: Path) -> None:
 def test_ask_refuses_unanswerable_question(tmp_path: Path) -> None:
     config_dir, env = _prepare(tmp_path)
     build = _run(
-        ["index", "build", "--repo", "sample", "--config-dir", str(config_dir)],
+        [
+            "index",
+            "build",
+            "--repo",
+            "sample",
+            "--config-dir",
+            str(config_dir),
+            "--embedding",
+            "hash",
+        ],
         cwd=tmp_path,
         env=env,
     )
     assert build.returncode == 0, build.stderr
 
     ask = _run(
-        ["ask", "--repo", "sample", "--question", "量子引力波速是多少"],
+        ["ask", "--repo", "sample", "--question", "量子引力波速是多少", "--no-rerank"],
         cwd=tmp_path,
         env=env,
     )
@@ -129,7 +156,16 @@ def test_second_index_build_keeps_both_versions(tmp_path: Path) -> None:
     config_dir, env = _prepare(tmp_path)
     for _ in range(2):
         build = _run(
-            ["index", "build", "--repo", "sample", "--config-dir", str(config_dir)],
+            [
+                "index",
+                "build",
+                "--repo",
+                "sample",
+                "--config-dir",
+                str(config_dir),
+                "--embedding",
+                "hash",
+            ],
             cwd=tmp_path,
             env=env,
         )

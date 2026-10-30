@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -32,6 +33,7 @@ class PageType(StrEnum):
 
     HOME = "home"
     OVERVIEW = "overview"
+    ARCHITECTURE = "architecture"
     MODULE = "module"
     INTERFACE = "interface"
     FLOW = "flow"
@@ -144,7 +146,10 @@ class PageTask(_WikiModel):
     page_id: str = Field(min_length=1)
     page_type: PageType
     title_hint: str = ""
-    subject: str = ""  # 模块名 / 符号 qualified_name / 配置文件路径 / 构建目标名 / 入口名
+    subject: str = ""  # 模块名 / 头文件路径 / 入口名 / 配置键
+    scope: str = ""  # 事实筛选范围：模块键、文件路径前缀或入口路径
+    rollup: bool = False  # 聚合页：把多个小模块合并成一页
+    exclude: list[str] = Field(default_factory=list)  # 聚合页排除已独立成页的模块
     coverage_level: CoverageLevel = CoverageLevel.C2
     priority: int = Field(default=0, ge=0)  # 越小越优先
     reuse: bool = False  # 增量：依赖未变化，直接复用旧页面
@@ -207,15 +212,47 @@ class VerifyReport(_WikiModel):
         return value
 
 
+class FileSummary(_WikiModel):
+    """任务包里的模块文件清单：只给路径与规模，不塞整份源码。"""
+
+    path: str
+    module: str = ""
+    language: str = ""
+    line_count: int = Field(default=0, ge=0)
+    symbol_count: int = Field(default=0, ge=0)
+
+
+class ModuleSummary(_WikiModel):
+    """系统页/架构页用的模块画像。"""
+
+    name: str
+    files: int = Field(default=0, ge=0)
+    symbols: int = Field(default=0, ge=0)
+    incoming: int = Field(default=0, ge=0)
+    outgoing: int = Field(default=0, ge=0)
+
+
+class TermEntry(_WikiModel):
+    """术语表条目：领域词 + 代码位置，供模型统一用词。"""
+
+    term: str
+    path: str = ""
+    line: int = Field(default=0, ge=0)
+    kind: str = ""
+
+
 class TaskFacts(_WikiModel):
     """任务包 context/facts.json：与该页面相关的事实子集（生成侧筛选）。"""
 
     module: str = ""
+    files: list[FileSummary] = Field(default_factory=list)
+    modules: list[ModuleSummary] = Field(default_factory=list)
     symbols: list[SymbolFact] = Field(default_factory=list)
     calls: list[CallFact] = Field(default_factory=list)
     configs: list[ConfigFact] = Field(default_factory=list)
     build_targets: list[BuildTarget] = Field(default_factory=list)
     tests: list[TestFact] = Field(default_factory=list)
+    terms: list[TermEntry] = Field(default_factory=list)
     stats: dict[str, int] = Field(default_factory=dict)  # overview/home 用
 
 
@@ -234,6 +271,7 @@ class TaskMeta(_WikiModel):
     snapshot_id: str
     module: str = ""
     coverage_level: CoverageLevel = CoverageLevel.C2
+    quality_profile: Literal["structural", "readable"] = "structural"
     prompt_version: str = Field(min_length=1)
     evidence: list[Evidence] = Field(default_factory=list)
     related_pages: list[str] = Field(default_factory=list)
@@ -280,6 +318,8 @@ __all__ = [
     "CoverageLevel",
     "CoveragePlan",
     "Evidence",
+    "FileSummary",
+    "ModuleSummary",
     "Page",
     "PageDeps",
     "PageMeta",
@@ -289,6 +329,7 @@ __all__ = [
     "PageType",
     "TaskFacts",
     "TaskMeta",
+    "TermEntry",
     "UnknownItem",
     "VerifyIssue",
     "VerifyReport",
