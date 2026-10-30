@@ -1,0 +1,39 @@
+# 本地文档：按项目要求只保留在本机，不推送到 GitHub
+docs/
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 构建与运行产物
+build/
+dist/
+site/
+logs/
+*.log
+
+# 下载物、缓存、数据、模型：都在工作区内，但不进版本库
+vendor/
+.cache/
+data/
+models/
+*.sqlite3
+*.db
+
+# 编辑器与系统文件
+.DS_Store
+.idea/
+.vscode/
+
+# 本地覆盖配置；示例配置可提交，真实密钥只走环境变量
+configs/local/
+*.local.yaml
