@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 from codingwiki.facts.extractor import EXTRACTOR_VERSION, FilesystemFactExtractor
+from codingwiki.facts.index import FactIndex
 from codingwiki.facts.protocol import FactExtractor, FactStore
 from codingwiki.facts.store import FilesystemFactStore
 
 __all__ = [
     "EXTRACTOR_VERSION",
     "FactExtractor",
+    "FactIndex",
     "FactStore",
     "FilesystemFactExtractor",
     "FilesystemFactStore",

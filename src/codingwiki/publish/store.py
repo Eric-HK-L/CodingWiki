@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
+from codingwiki.domain.models import ChangeSet
 from codingwiki.domain.wiki import (
     PageDeps,
     PageStatus,
@@ -119,6 +120,7 @@ class FilesystemPageStore:
         entries: list[VersionPageEntry] = []
         payload: list[tuple[str, str, str]] = []  # (page_id, page_text, result_text)
         prompt_versions: dict[str, str] = {}
+        deps_map = self.load_deps()
         for page_id in page_ids:
             loaded = self.load_draft(page_id)
             meta = self.draft_meta(page_id)
@@ -165,6 +167,11 @@ class FilesystemPageStore:
             stem.parent.mkdir(parents=True, exist_ok=True)
             stem.with_suffix(".md").write_text(page_text, encoding="utf-8")
             _write_json(stem.with_suffix(".result.json"), result_text)
+            # 版本自包含：deps 落进版本目录，stale 标记不依赖草稿区
+            # （草稿会被下一轮 generate 覆盖，S7 §16.3-5）
+            deps = deps_map.get(page_id)
+            if deps is not None:
+                _write_json(stem.with_suffix(".deps.json"), deps.model_dump_json(indent=2))
 
         index = VersionIndex(
             version_id=version_id,
@@ -224,6 +231,67 @@ class FilesystemPageStore:
                 continue
             pages.append((entry.page_id, entry.title, path.read_text(encoding="utf-8")))
         return pages
+
+    # ---------------------------------------------------------------- 页面生命周期（S7 §16.3-5）
+
+    def load_version_deps(self, version_id: str) -> dict[str, PageDeps]:
+        """读取某发布版本内各页面的依赖记录（publish 时随页面落盘）。"""
+        pages_dir = self._root / "versions" / version_id / "pages"
+        deps: dict[str, PageDeps] = {}
+        if not pages_dir.is_dir():
+            return deps
+        for path in pages_dir.rglob("*.deps.json"):
+            try:
+                item = PageDeps.model_validate_json(path.read_text(encoding="utf-8"))
+            except ValueError:
+                continue
+            deps[item.page_id] = item
+        return deps
+
+    def mark_stale(self, changes: ChangeSet, version_id: str | None = None) -> list[str]:
+        """快照 diff 中 deleted/modified/renamed 的文件 → 相关页面标 stale（9.14）。
+
+        只改版本 index.json 里的状态，不动页面内容；返回被标记的 page_id。
+        重命名按旧路径算依赖命中（页面引用的是旧路径）。
+        """
+        version = version_id or self.current_version()
+        if version is None:
+            raise InputError(f"仓库 {self._repo_id} 还没有发布版本，无页面可标 stale")
+        index = self.version_index(version)
+        if index is None:
+            raise InputError(f"版本 {version} 的 index.json 不存在")
+
+        changed = set(changes.modified) | set(changes.deleted) | set(changes.binary_changed)
+        changed.update(old for old, _new in changes.renamed)
+        if not changed:
+            return []
+
+        deps_map = self.load_version_deps(version)
+        marked: list[str] = []
+        new_entries: list[VersionPageEntry] = []
+        for entry in index.pages:
+            deps = deps_map.get(entry.page_id)
+            hit = deps is not None and bool(changed.intersection(deps.files))
+            if hit and entry.status is not PageStatus.STALE:
+                marked.append(entry.page_id)
+                new_entries.append(entry.model_copy(update={"status": PageStatus.STALE}))
+            else:
+                new_entries.append(entry)
+        if marked:
+            updated = index.model_copy(update={"pages": new_entries})
+            _write_json(
+                self._root / "versions" / version / "index.json",
+                updated.model_dump_json(indent=2),
+            )
+        return marked
+
+    def rollback(self, to_version_id: str) -> str:
+        """把 current 指针切回某个历史版本。版本必须存在；内容不改。"""
+        if self.version_index(to_version_id) is None:
+            known = ", ".join(self.list_versions()) or "（无）"
+            raise InputError(f"版本 {to_version_id} 不存在，无法回滚；已有版本: {known}")
+        (self._root / "current").write_text(to_version_id, encoding="utf-8")
+        return to_version_id
 
     # ---------------------------------------------------------------- 内部
 
