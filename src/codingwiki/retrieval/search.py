@@ -50,6 +50,11 @@ class HybridSearcher:
         self._bm25 = bm25 or Bm25Index(texts)
         self._texts_lower = [t.lower() for t in texts]
 
+    @property
+    def embedder_name(self) -> str:
+        """嵌入模型全名（评测报告与索引元数据对账用）。"""
+        return self._embedder.name
+
     def search(
         self,
         query: str,

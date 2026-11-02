@@ -191,6 +191,16 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser.add_argument("--no-rerank", action="store_true", help="关闭 cross-encoder 重排")
     ask_parser.set_defaults(handler=_cmd_ask)
 
+    eval_parser = subcommands.add_parser(
+        "eval", help="金标准集评测：Recall@k / MRR / nDCG / 拒答 / 出处（S9）"
+    )
+    eval_parser.add_argument("--repo", required=True, help="仓库 ID")
+    eval_parser.add_argument("--golden", required=True, help="金标准集 YAML 路径")
+    eval_parser.add_argument("--top-k", type=int, default=10, help="检索深度 k")
+    eval_parser.add_argument("--app-config", default="", help="主配置路径（模型/重排参数来源）")
+    eval_parser.add_argument("--no-rerank", action="store_true", help="关闭 cross-encoder 重排")
+    eval_parser.set_defaults(handler=_cmd_eval)
+
     return parser
 
 
@@ -772,6 +782,94 @@ def _cmd_ask(args: argparse.Namespace) -> int:
             f"---\nconfidence={outcome.result.confidence}  "
             f"citations={len(outcome.result.citations)}  attempts={outcome.attempts}"
         )
+    return int(ExitCode.OK)
+
+
+def _cmd_eval(args: argparse.Namespace) -> int:
+    from codingwiki.backends import MockBackend
+    from codingwiki.eval import EvalHarness, load_golden, load_previous_report, save_report
+    from codingwiki.publish import FilesystemPageStore
+    from codingwiki.retrieval import AnswerPipeline, FilesystemIndexStore
+
+    golden = load_golden(args.golden)
+    if golden.repo_id != args.repo:
+        raise InputError(
+            f"金标准集 {golden.set_id} 属于仓库 {golden.repo_id}，与 --repo {args.repo} 不一致"
+        )
+
+    facts = _load_facts_or_raise(args.repo)
+    searcher = _load_searcher(args.repo, app_config=args.app_config, no_rerank=args.no_rerank)
+    _meta, chunks, _vectors = FilesystemIndexStore(args.repo).load()
+    store = FilesystemPageStore(args.repo)
+    known_pages: set[str] = set()
+    current = store.current_version()
+    if current:
+        index = store.version_index(current)
+        if index:
+            known_pages = {p.page_id for p in index.pages}
+
+    pipeline = AnswerPipeline(MockBackend(), searcher)
+    harness = EvalHarness(
+        searcher,
+        chunks,
+        pipeline,
+        known_pages=known_pages,
+        known_paths=set(facts.blob_by_path),
+    )
+    report = harness.run(golden, top_k=max(args.top_k, 1))
+    report = report.model_copy(update={"snapshot_id": facts.snapshot_id})
+
+    previous = load_previous_report(args.repo, golden.set_id)
+    path = save_report(report, args.repo)
+
+    def _delta(name: str, now: float | None, before: float | None) -> str:
+        if now is None:
+            return f"{name}=n/a"
+        line = f"{name}={now:.1%}"
+        if before is not None:
+            diff = now - before
+            line += f"（上次 {before:.1%}，{'+' if diff >= 0 else ''}{diff:.1%}）"
+        return line
+
+    print(
+        f"评测完成: set={report.set_id}, repo={report.repo_id}, model={report.index_model}, "
+        f"top_k={report.top_k}, questions={report.question_count}"
+    )
+    print(
+        "  "
+        + _delta("Recall@k", report.recall_at_k, previous.recall_at_k if previous else None)
+        + "  "
+        + _delta("MRR", report.mrr, previous.mrr if previous else None)
+        + "  "
+        + _delta("nDCG@k", report.ndcg_at_k, previous.ndcg_at_k if previous else None)
+    )
+    print(
+        "  "
+        + _delta(
+            "拒答准确率", report.refusal_accuracy, previous.refusal_accuracy if previous else None
+        )
+        + f"（拒答正确 {report.refusal_correct}/{report.refusal_total}，"
+        f"可答题误拒 {report.false_refusal}/{report.answerable_total}）"
+    )
+    print(
+        "  "
+        + _delta(
+            "出处有效率",
+            report.citation_valid_rate,
+            previous.citation_valid_rate if previous else None,
+        )
+    )
+    if report.misses:
+        print("未命中题: " + ", ".join(q.question_id for q in report.misses))
+    if report.wrong_refusals:
+        wrong = report.wrong_refusals
+        print(
+            "拒答判定错误: "
+            + ", ".join(
+                f"{q.question_id}（期望{'拒答' if q.expect_refused else '回答'}）" for q in wrong
+            )
+        )
+    print(f"报告: {path}")
     return int(ExitCode.OK)
 
 
