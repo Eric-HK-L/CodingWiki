@@ -1,0 +1,97 @@
+# 金标准集 cuphy-v1（计划文档 10.9.1，S9 评测基线）
+#
+# 规则（10.9.1.5）：本文件版本化、只增不改；改题必须升版本号另立文件。
+# 出题依据：cuphy 快照 4f65f97c（91 页 Wiki + 27,640 块索引，S6.5 交付）。
+#
+# 字段：
+#   question       检索/问答原文（模拟真实工程师问法）
+#   expect_refused 资料不足应拒答的题（此时不填 expect_any）
+#   expect_any     期望资料：page_id 精确匹配，或文件路径（以 / 结尾按前缀匹配）；命中任一即算正确资料
+#   difficulty     easy / medium / hard
+
+set_id: cuphy-v1
+repo_id: cuphy
+description: cuphy 检索与问答基线：16 检索题（模块定位/配置/构建/测试/架构）+ 4 拒答题
+questions:
+  # ---------------------------------------------------------------- 检索题（16）
+  - id: Q01
+    question: "LDPC 译码在哪个模块实现？"
+    expect_any: ["module/src/cuphy/ldpc", "src/cuphy/ldpc/", "module/util/ldpc"]
+    difficulty: easy
+  - id: Q02
+    question: "PUSCH 信道估计的代码在哪里？"
+    expect_any: ["module/src/cuphy/ch_est", "src/cuphy/ch_est/", "examples/ch_est/"]
+    difficulty: easy
+  - id: Q03
+    question: "Polar 编码器的实现文件是什么？"
+    expect_any: ["module/src/cuphy/polar_encoder", "src/cuphy/polar_encoder/"]
+    difficulty: easy
+  - id: Q04
+    question: "CRC 校验和附着在哪一部分实现？"
+    expect_any: ["module/src/cuphy/crc", "src/cuphy/crc/", "module/test/crc"]
+    difficulty: easy
+  - id: Q05
+    question: "软解调 soft demapper 的实现在哪？"
+    expect_any: ["module/src/cuphy/soft_demapper", "src/cuphy/soft_demapper/"]
+    difficulty: medium
+  - id: Q06
+    question: "信道均衡 channel equalizer 在哪个模块？"
+    expect_any: ["module/src/cuphy/channel_eq", "src/cuphy/channel_eq/"]
+    difficulty: easy
+  - id: Q07
+    question: "PRACH 接收机的处理流程在哪？"
+    expect_any: ["module/src/cuphy/prach_receiver", "src/cuphy/prach_receiver/", "module/test/prach_receiver"]
+    difficulty: medium
+  - id: Q08
+    question: "频偏和定时偏移估计（CFO/TA）在哪实现？"
+    expect_any: ["module/src/cuphy/cfo_ta_est", "src/cuphy/cfo_ta_est/"]
+    difficulty: medium
+  - id: Q09
+    question: "PUCCH format 3 的前端处理在哪？"
+    expect_any: ["module/src/cuphy/pucch_F3_front_end", "module/examples/pucch_F234_uci_seg"]
+    difficulty: hard
+  - id: Q10
+    question: "解扰 descrambling 的代码位置？"
+    expect_any: ["module/src/cuphy/descrambling", "src/cuphy/descrambling/"]
+    difficulty: medium
+  - id: Q11
+    question: "cuphy 主库的 CMake 构建目标在哪里定义？"
+    expect_any: ["build", "src/cuphy/CMakeLists.txt", "module/src/cuphy"]
+    difficulty: medium
+  - id: Q12
+    question: "HDF5 数据读写的封装在哪？"
+    expect_any: ["module/src/cuphy_hdf5", "src/cuphy_hdf5/"]
+    difficulty: easy
+  - id: Q13
+    question: "CRC 相关的测试可执行程序是哪个，在哪定义？"
+    expect_any: ["module/test/crc", "test/crc/", "test"]
+    difficulty: medium
+  - id: Q14
+    question: "信道估计示例 chest_trt.yaml 配置文件里有哪些字段？"
+    expect_any: ["config", "examples/ch_est/chest_trt.yaml", "module/src/cuphy/ch_est"]
+    difficulty: hard
+  - id: Q15
+    question: "下行速率匹配 rate matching 在哪实现？"
+    expect_any: ["module/src/cuphy/dl_rate_matching", "module/test/rate_matching", "module/util/ldpc"]
+    difficulty: medium
+  - id: Q16
+    question: "UCI on PUSCH 的 CSI 控制逻辑在哪？"
+    expect_any: ["module/src/cuphy/uci_on_pusch", "module/test/uciOnPusch_csi2Ctrl"]
+    difficulty: hard
+  # ---------------------------------------------------------------- 拒答题（4）
+  - id: R01
+    question: "这个项目怎么部署到 Kubernetes 集群上？"
+    expect_refused: true
+    difficulty: easy
+  - id: R02
+    question: "Aerial CUDA RAN 库的商业授权怎么购买，价格是多少？"
+    expect_refused: true
+    difficulty: easy
+  - id: R03
+    question: "cuphy PUSCH 的功耗数据跟竞品对比怎么样？"
+    expect_refused: true
+    difficulty: medium
+  - id: R04
+    question: "3GPP TS 38.211 的完整章节目录列一下？"
+    expect_refused: true
+    difficulty: medium
