@@ -19,7 +19,7 @@ from codingwiki.domain.models import (
     RepoMetadata,
     RepoType,
 )
-from codingwiki.errors import EnvironmentIssue, InternalError, RetryableError
+from codingwiki.errors import EnvironmentIssue, InputError, InternalError, RetryableError
 
 
 class GitProvider:
@@ -33,6 +33,17 @@ class GitProvider:
     def latest_revision(self, repo: RepoConfig) -> str:
         bare = self._ensure_bare(repo)
         ref = repo.branch
+        # 必须先 fetch：_ensure_bare 只在 remote-tracking refs 缺失时才 fetch，
+        # 直接 rev-parse 会拿到上次同步的旧 SHA，导致第二次 repo sync 看不到新提交
+        # （S7 端到端测试暴露；stale 标记依赖快照能随远端更新）。
+        # 用全量 refspec，确保 refs/remotes/origin/* 被更新（裸分支名只写 FETCH_HEAD）。
+        self._run(
+            ["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
+            cwd=bare,
+            retryable=True,
+            extra_args=self._auth_args(repo),
+            env=self._command_env(),
+        )
         out = self._run(
             ["rev-parse", f"origin/{ref}"],
             cwd=bare,
@@ -80,6 +91,53 @@ class GitProvider:
             cwd=bare,
         )
         return _parse_name_status(out, old, new)
+
+    def create_worktree(
+        self, repo: RepoConfig, revision: str, path: str | Path, branch: str = ""
+    ) -> Path:
+        """为指定 revision 建独立工作树（§16.3-4）。
+
+        branch 为空：detached 工作树（只读分析场景）；
+        branch 非空：在该 revision 上新建分支并挂到工作树（三阶段编码任务）。
+        与 materialize 不同：不回收/复用任何已有目录，调用方保证 path 不存在或为空目录。
+        """
+        bare = self._ensure_bare(repo)
+        worktree = Path(path).resolve()
+        if worktree.exists() and any(worktree.iterdir()):
+            raise InputError(f"工作树路径已存在且非空: {worktree}")
+
+        self._run(
+            ["fetch", "--prune", "origin", repo.branch],
+            cwd=bare,
+            retryable=True,
+            extra_args=self._auth_args(repo),
+            env=self._command_env(),
+        )
+        args = ["worktree", "add"]
+        if branch:
+            args += ["-b", branch]
+        else:
+            args.append("--detach")
+        args += [str(worktree), revision]
+        self._run(args, cwd=bare)
+        return worktree
+
+    def remove_worktree(self, path: str | Path) -> None:
+        """移除工作树并清理 git worktree 记录。
+
+        git 拒绝在 worktree 内部移除当前工作树，所以先通过
+        `git -C <path> rev-parse --git-common-dir` 定位主仓库，再从主仓库执行。
+        """
+        worktree = Path(path).resolve()
+        if not worktree.is_dir():
+            raise InputError(f"工作树不存在: {worktree}")
+        common_dir = self._run(
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=worktree,
+        ).strip()
+        if not common_dir:
+            raise InputError(f"{worktree} 不是 git 工作树（拿不到 git-common-dir）")
+        self._run(["worktree", "remove", "--force", str(worktree)], cwd=Path(common_dir))
 
     def read_file(self, repo: RepoConfig, revision: str, path: str) -> bytes:
         bare = self._ensure_bare(repo)

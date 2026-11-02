@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from codingwiki.domain.rag import TIER_ORDER, Chunk, SearchHit
+from codingwiki.domain.rag import TIER_ORDER, Chunk, SearchFilters, SearchHit
 from codingwiki.retrieval.bm25 import Bm25Index
 from codingwiki.retrieval.embed import EmbeddingBackend, cosine
 from codingwiki.retrieval.rerank import RerankerBackend
@@ -50,17 +50,35 @@ class HybridSearcher:
         self._bm25 = bm25 or Bm25Index(texts)
         self._texts_lower = [t.lower() for t in texts]
 
-    def search(self, query: str, top_k: int = 10, per_channel: int = 50) -> list[SearchHit]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        per_channel: int = 50,
+        filters: SearchFilters | None = None,
+    ) -> list[SearchHit]:
         if not query.strip() or not self._chunks:
             return []
 
+        # 范围过滤（§16.3-2）：在候选阶段就生效——BM25 与向量两路都只在
+        # 允许的块里取 Top N，否则过滤会退化成「事后丢弃」。
+        allowed: frozenset[int] | None = None
+        if filters is not None and not filters.is_empty():
+            allowed = frozenset(self._filter_indexes(filters))
+            if not allowed:
+                return []
+
         bm25_hits = self._bm25.query(query, top_n=per_channel)
+        if allowed is not None:
+            bm25_hits = [(i, s) for i, s in bm25_hits if i in allowed]
         bm25_rank = _competition_ranks(bm25_hits)
 
         query_vec = self._embedder.embed([query])[0]
         sims = [(i, cosine(query_vec, vec)) for i, vec in enumerate(self._vectors)]
         sims = [x for x in sims if x[1] > 0.0]
         sims.sort(key=lambda x: (-x[1], x[0]))
+        if allowed is not None:
+            sims = [x for x in sims if x[0] in allowed]
         top_sims = sims[:per_channel]
         vector_rank = _competition_ranks(top_sims)
         vector_score = {idx: s for idx, s in top_sims}
@@ -92,6 +110,28 @@ class HybridSearcher:
         if self._reranker is None or not hits:
             return hits[:top_k]
         return self._rerank(query, hits, top_k)
+
+    def _filter_indexes(self, filters: SearchFilters) -> list[int]:
+        """按过滤条件算出允许参与检索的块下标；六个条件取交集。"""
+        source_types = set(filters.source_types)
+        trust_tiers = set(filters.trust_tiers)
+        page_ids = set(filters.page_ids)
+        matched: list[int] = []
+        for idx, chunk in enumerate(self._chunks):
+            if filters.module and chunk.module != filters.module:
+                continue
+            if filters.file_prefix and not chunk.file.startswith(filters.file_prefix):
+                continue
+            if source_types and chunk.source_type not in source_types:
+                continue
+            if trust_tiers and chunk.trust_tier not in trust_tiers:
+                continue
+            if filters.snapshot_id and chunk.snapshot_id != filters.snapshot_id:
+                continue
+            if page_ids and chunk.page_id not in page_ids:
+                continue
+            matched.append(idx)
+        return matched
 
     def _rerank(self, query: str, hits: list[SearchHit], top_k: int) -> list[SearchHit]:
         """对融合后的候选池做 cross-encoder 重排；池外的结果不参与最终排序。"""

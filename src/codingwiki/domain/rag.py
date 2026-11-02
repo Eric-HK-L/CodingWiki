@@ -42,6 +42,32 @@ class Chunk(_WikiModel):
         return self.file
 
 
+class SearchFilters(_WikiModel):
+    """检索范围过滤（架构文档 v0.7 §16.3-2）。
+
+    全部字段缺省 = 不过滤（行为与 S5 一致）。二三阶段用它们做
+    「只找某模块的影响面」「只看允许修改的文件」与 ACL 的 allowed_modules。
+    """
+
+    module: str = ""  # Chunk.module 精确匹配
+    file_prefix: str = ""  # Chunk.file 前缀匹配（wiki 块 file 为空，会被排除）
+    source_types: tuple[str, ...] = ()  # code / wiki / build / config / test
+    trust_tiers: tuple[str, ...] = ()  # wiki / fact / code
+    snapshot_id: str = ""  # Chunk.snapshot_id 精确匹配
+    page_ids: tuple[str, ...] = ()  # wiki 块所属页面
+
+    def is_empty(self) -> bool:
+        """没有任何过滤条件时为 True，检索层据此走原路径。"""
+        return not (
+            self.module
+            or self.file_prefix
+            or self.source_types
+            or self.trust_tiers
+            or self.snapshot_id
+            or self.page_ids
+        )
+
+
 class IndexMeta(_WikiModel):
     """index.json：索引版本元数据，绑定快照与嵌入模型。"""
 
@@ -107,6 +133,7 @@ __all__ = [
     "AskOutcome",
     "Chunk",
     "IndexMeta",
+    "SearchFilters",
     "SearchHit",
     "SourcePassage",
     "TIER_ORDER",

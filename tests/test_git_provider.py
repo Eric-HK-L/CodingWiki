@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from codingwiki.domain.models import RepoConfig, RepoType
-from codingwiki.errors import EnvironmentIssue, InternalError
+from codingwiki.errors import EnvironmentIssue, InputError, InternalError
 from codingwiki.providers import GitProvider, create_provider
 
 
@@ -137,6 +137,30 @@ def test_latest_revision_returns_head_sha(isolated_home: Path, tmp_path: Path) -
 
     # 第二次 push 后 remote HEAD 指向 sha2
     assert sha == sha2
+
+
+def test_latest_revision_fetches_new_commits_after_bare_exists(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """S7 缺陷回归：bare 仓库已存在时，latest_revision 仍必须 fetch 到新提交。
+
+    曾经只在 remote-tracking refs 缺失时才 fetch，导致第二次 repo sync
+    永远解析到旧 SHA，快照不再更新。
+    """
+    _bare, _sha1, sha2 = _make_two_commit_repo(tmp_path)
+    repo = _repo_config(tmp_path)
+    provider = GitProvider()
+    assert provider.latest_revision(repo) == sha2
+
+    # 在原工作仓库追加第三个提交并 push
+    work = tmp_path / "work"
+    _commit_one(work, "src/late.py", "# late")
+    _run_git(work, "push", "origin", "main")
+    sha3 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(work), capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    assert provider.latest_revision(repo) == sha3
 
 
 def test_materialize_fixes_worktree_to_specified_revision(
@@ -288,3 +312,94 @@ def test_metadata_returns_repo_metadata(isolated_home: Path, tmp_path: Path) -> 
     assert md.repo_id == "demo"
     assert md.provider is RepoType.GIT
     assert md.default_branch == "main"
+
+
+# ---------------------------------------------------------------- worktree（S7 §16.3-4）
+
+
+def _worktree_list(bare: Path) -> list[str]:
+    out = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=str(bare),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return [line.split()[1] for line in out.splitlines() if line.startswith("worktree ")]
+
+
+def test_create_worktree_detached(isolated_home: Path, tmp_path: Path) -> None:
+    _bare, sha1, _ = _make_two_commit_repo(tmp_path)
+    repo = _repo_config(tmp_path)
+    provider = GitProvider()
+    target = tmp_path / "wt-detached"
+
+    path = provider.create_worktree(repo, sha1, target)
+
+    assert path == target.resolve()
+    assert path.is_dir()
+    actual = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert actual == sha1
+
+
+def test_create_worktree_with_branch(isolated_home: Path, tmp_path: Path) -> None:
+    _bare, sha1, _ = _make_two_commit_repo(tmp_path)
+    repo = _repo_config(tmp_path)
+    provider = GitProvider()
+    target = tmp_path / "wt-branch"
+
+    path = provider.create_worktree(repo, sha1, target, branch="task/F-001")
+
+    head = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert head == "task/F-001"
+    # 分支基点就是指定 revision
+    base = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "task/F-001~0"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert base == sha1
+
+
+def test_create_worktree_rejects_non_empty_dir(isolated_home: Path, tmp_path: Path) -> None:
+    _bare, sha1, _ = _make_two_commit_repo(tmp_path)
+    repo = _repo_config(tmp_path)
+    provider = GitProvider()
+    target = tmp_path / "wt-full"
+    target.mkdir()
+    (target / "occupied.txt").write_text("x", encoding="utf-8")
+
+    with pytest.raises(InputError, match="已存在且非空"):
+        provider.create_worktree(repo, sha1, target)
+
+
+def test_remove_worktree_cleans_git_records(isolated_home: Path, tmp_path: Path) -> None:
+    _bare, sha1, _ = _make_two_commit_repo(tmp_path)
+    repo = _repo_config(tmp_path)
+    provider = GitProvider()
+    target = provider.create_worktree(repo, sha1, tmp_path / "wt-gone")
+    assert target.is_dir()
+
+    provider.remove_worktree(target)
+
+    assert not target.exists()
+    assert str(target) not in " ".join(_worktree_list(_bare))
+
+
+def test_remove_worktree_missing_path_raises(isolated_home: Path, tmp_path: Path) -> None:
+    _bare, _, _ = _make_two_commit_repo(tmp_path)
+    provider = GitProvider()
+
+    with pytest.raises(InputError, match="工作树不存在"):
+        provider.remove_worktree(tmp_path / "nope")

@@ -27,6 +27,40 @@ class RepoType(StrEnum):
     P4 = "p4"
 
 
+class BuildCommands(_DomainModel):
+    """构建命令（计划文档 14.7.1）。空字符串表示未配置该步。"""
+
+    configure: str = ""
+    compile: str = ""
+    incremental: str = ""
+    timeout_s: int = Field(default=1800, ge=1, le=86_400)
+
+
+class TestCommands(_DomainModel):
+    """测试命令（14.7.1）。fast 是快速通道，full 是回归全量。"""
+
+    fast: str = ""
+    full: str = ""
+    timeout_s: int = Field(default=3600, ge=1, le=86_400)
+
+
+class LintCommands(_DomainModel):
+    """静态检查命令（14.7.1）。"""
+
+    command: str = ""
+    timeout_s: int = Field(default=600, ge=1, le=86_400)
+
+
+class RepoCommands(_DomainModel):
+    """仓库级命令配置：configure/compile/test/lint 由编排器执行（14.3 硬边界：
+    模型只改文件，不跑命令）。命令是 shell 字符串形态，落 CommandSpec 时由调用方
+    负责拆 argv。"""
+
+    build: BuildCommands = Field(default_factory=BuildCommands)
+    test: TestCommands = Field(default_factory=TestCommands)
+    lint: LintCommands = Field(default_factory=LintCommands)
+
+
 class RepoConfig(_DomainModel):
     """单个代码仓库的运行配置。"""
 
@@ -42,6 +76,7 @@ class RepoConfig(_DomainModel):
     language_overrides: dict[str, str] = Field(default_factory=dict)
     binary_extensions: list[str] = Field(default_factory=list)
     generate_file_exclusion_defaults: bool = True
+    commands: RepoCommands = Field(default_factory=RepoCommands)
 
     @field_validator("url")
     @classmethod
@@ -138,11 +173,15 @@ class ChangeSet(_DomainModel):
 
 
 __all__ = [
+    "BuildCommands",
     "ChangeSet",
     "FileEntry",
+    "LintCommands",
     "Manifest",
+    "RepoCommands",
     "RepoConfig",
     "RepoMetadata",
     "RepoType",
     "Snapshot",
+    "TestCommands",
 ]

@@ -31,6 +31,14 @@ class SourceProvider(Protocol):
     def read_file(self, repo: RepoConfig, revision: str, path: str) -> bytes: ...
     def metadata(self, repo: RepoConfig) -> RepoMetadata: ...
 
+    # S7 接口缝（§16.3-4）：三阶段每任务一个独立工作树，无法靠
+    # materialize 复用同一个目录。branch 为空建 detached 工作树；
+    # 非空则在 revision 上新建分支并挂到该工作树。
+    def create_worktree(
+        self, repo: RepoConfig, revision: str, path: str | Path, branch: str = ""
+    ) -> Path: ...
+    def remove_worktree(self, path: str | Path) -> None: ...
+
 
 def create_provider(provider_type: RepoType) -> SourceProvider:
     """按 RepoType 创建对应 Provider。
@@ -49,7 +57,7 @@ def create_provider(provider_type: RepoType) -> SourceProvider:
     if provider_type is RepoType.P4:
         from codingwiki.errors import EnvironmentIssue
 
-        raise EnvironmentIssue("P4 Provider 未实现；请在 S3 启用，或改用 git/github")
+        raise EnvironmentIssue("P4 Provider 未接入；请改用 git/github（S7 §16.6：显式报错）")
     # 不可达：RepoType 是 StrEnum，只有上述三种
     raise ValueError(f"未知 provider 类型: {provider_type}")  # pragma: no cover
 

@@ -132,6 +132,17 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--repo", required=True, help="仓库 ID")
     status_parser.set_defaults(handler=_cmd_wiki_status)
 
+    stale_parser = wiki_subcommands.add_parser(
+        "stale", help="按最新快照与当前版本的差异，把受影响页面标 stale"
+    )
+    stale_parser.add_argument("--repo", required=True, help="仓库 ID")
+    stale_parser.set_defaults(handler=_cmd_wiki_stale)
+
+    rollback_parser = wiki_subcommands.add_parser("rollback", help="把 current 指针切回历史版本")
+    rollback_parser.add_argument("--repo", required=True, help="仓库 ID")
+    rollback_parser.add_argument("--to", dest="to_version", required=True, help="目标版本 ID")
+    rollback_parser.set_defaults(handler=_cmd_wiki_rollback)
+
     index_parser = subcommands.add_parser("index", help="检索索引（S5）")
     index_subcommands = index_parser.add_subparsers(dest="index_command", required=True)
     index_build_parser = index_subcommands.add_parser(
@@ -166,6 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--top-k", type=int, default=10, help="返回条数")
     search_parser.add_argument("--app-config", default="", help="主配置路径（模型/重排参数来源）")
     search_parser.add_argument("--no-rerank", action="store_true", help="关闭 cross-encoder 重排")
+    search_parser.add_argument("--module", default="", help="按模块精确过滤（S7 SearchFilters）")
+    search_parser.add_argument(
+        "--file-prefix", default="", help="按文件路径前缀过滤（S7 SearchFilters）"
+    )
     search_parser.set_defaults(handler=_cmd_search)
 
     ask_parser = subcommands.add_parser("ask", help="带来源出处的问答（S5）")
@@ -558,6 +573,49 @@ def _cmd_wiki_publish(args: argparse.Namespace) -> int:
     return int(ExitCode.OK)
 
 
+def _cmd_wiki_stale(args: argparse.Namespace) -> int:
+    from codingwiki.publish import FilesystemPageStore
+    from codingwiki.snapshot import FilesystemSnapshotStore
+
+    store = FilesystemPageStore(args.repo)
+    current = store.current_version()
+    if current is None:
+        raise InputError(f"仓库 {args.repo} 还没有发布版本，请先执行 wiki publish")
+    index = store.version_index(current)
+    if index is None:
+        raise InputError(f"当前版本 {current} 的 index.json 不存在")
+
+    snapshots = FilesystemSnapshotStore()
+    latest = snapshots.latest(args.repo)
+    if latest is None:
+        raise InputError(f"仓库 {args.repo} 还没有快照，请先执行 repo sync")
+    if latest.snapshot_id == index.snapshot_id:
+        print(f"快照未变化（{index.snapshot_id}），没有页面需要标 stale")
+        return int(ExitCode.OK)
+
+    changes = snapshots.diff_manifests(index.snapshot_id, latest.snapshot_id)
+    marked = store.mark_stale(changes)
+    print(
+        f"stale 标记: {len(marked)} 页（快照 {index.snapshot_id} → {latest.snapshot_id}，"
+        f"变更 modified={len(changes.modified)} deleted={len(changes.deleted)} "
+        f"renamed={len(changes.renamed)}）"
+    )
+    if marked:
+        print("受影响页面: " + ", ".join(marked[:10]))
+    return int(ExitCode.OK)
+
+
+def _cmd_wiki_rollback(args: argparse.Namespace) -> int:
+    from codingwiki.publish import FilesystemPageStore
+
+    store = FilesystemPageStore(args.repo)
+    version = store.rollback(args.to_version)
+    index = store.version_index(version)
+    pages = len(index.pages) if index else 0
+    print(f"已回滚: current -> {version}（{pages} 页）")
+    return int(ExitCode.OK)
+
+
 def _cmd_wiki_status(args: argparse.Namespace) -> int:
     from codingwiki.publish import FilesystemPageStore
 
@@ -687,8 +745,11 @@ def _load_searcher(
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
+    from codingwiki.domain.rag import SearchFilters
+
     searcher = _load_searcher(args.repo, app_config=args.app_config, no_rerank=args.no_rerank)
-    hits = searcher.search(args.query, top_k=max(args.top_k, 1))
+    filters = SearchFilters(module=args.module, file_prefix=args.file_prefix)
+    hits = searcher.search(args.query, top_k=max(args.top_k, 1), filters=filters)
     if not hits:
         print("没有匹配的资料")
         return int(ExitCode.OK)
