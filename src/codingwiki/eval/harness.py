@@ -13,7 +13,7 @@ from datetime import UTC
 from pathlib import Path
 
 from codingwiki.domain.eval import EvalReport, GoldenSet, QuestionResult
-from codingwiki.domain.rag import AskOutcome, Chunk
+from codingwiki.domain.rag import AskOutcome, Chunk, SearchHit
 from codingwiki.retrieval.answer import AnswerPipeline
 from codingwiki.retrieval.search import HybridSearcher
 
@@ -26,6 +26,14 @@ def _matches_expectation(file: str, page_id: str, expect_any: tuple[str, ...]) -
         if file and (file == expect or (expect.endswith("/") and file.startswith(expect))):
             return True
     return False
+
+
+def _top_features(hits: list[SearchHit]) -> tuple[float, int]:
+    """Top1 命中特征：(vector_score, bm25_rank)，拒答判定所依据的两个量。"""
+    if not hits:
+        return (0.0, 0)
+    top = hits[0]
+    return (round(top.vector_score, 6), top.bm25_rank)
 
 
 def _ndcg_binary(ranks: list[int], total_relevant: int, k: int) -> float:
@@ -82,6 +90,9 @@ class EvalHarness:
         citation_valid = 0
 
         for q in golden.questions:
+            # 每题只检索一次：排序指标与 Top1 特征（拒答阈值标定/delta 对比用）共用。
+            hits = self._searcher.search(q.question, top_k=top_k)
+            top_score, top_bm25 = _top_features(hits)
             if q.expect_refused:
                 refusal_total += 1
                 outcome = self._pipeline.ask(golden.repo_id, q.question, top_k=top_k)
@@ -93,12 +104,13 @@ class EvalHarness:
                         question=q.question,
                         expect_refused=True,
                         refused=outcome.refused,
+                        top_vector_score=top_score,
+                        top_bm25_rank=top_bm25,
                     )
                 )
                 continue
 
             answerable += 1
-            hits = self._searcher.search(q.question, top_k=top_k)
             hit_ranks = [
                 rank
                 for rank, hit in enumerate(hits, start=1)
@@ -128,6 +140,8 @@ class EvalHarness:
                     ndcg=ndcg,
                     citation_total=total,
                     citation_valid=valid,
+                    top_vector_score=top_score,
+                    top_bm25_rank=top_bm25,
                 )
             )
 

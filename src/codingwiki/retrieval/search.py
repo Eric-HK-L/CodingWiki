@@ -19,8 +19,12 @@ _RRF_K = 60
 _EXACT_IDENTIFIER_BOOST = 0.05  # 查询标识符在块文本中原样出现（大小写敏感前已归一）
 # 无语义模型（哈希）时的噪声统计上限系数，见 min_vector_score()
 _HASH_NOISE_MARGIN = 1.5
-# 真实语义模型的标定拒答门槛（cosine 低于此值视为不相关）
-_DEFAULT_SEMANTIC_MIN_SCORE = 0.35
+# 真实语义模型的标定拒答门槛（cosine 低于此值视为不相关）。
+# S9-b 按 cuphy-v2 金标准集（56 问，bge-m3，27,640 块）实测分布标定：
+# 拒答题 Top1 向量分上界 0.5907（R01，另有 1 道 hard 例 R05=0.665 不可分），
+# 可答题下界 0.5740（Q23）——能同时拒掉 R01 且放过 Q06 的分隔区间为
+# (0.5907, 0.5999)，取中点 0.595：拒答正确 15/16、可答题误拒 2/40（Q23/Q29）。
+_DEFAULT_SEMANTIC_MIN_SCORE = 0.595
 
 
 class HybridSearcher:
@@ -169,6 +173,21 @@ class HybridSearcher:
         n = max(len(self._chunks), 2)
         noise_max = math.sqrt(2.0 * math.log(n)) / math.sqrt(self._embedder.dim)
         return margin * noise_max
+
+    def is_refusal(self, top: SearchHit | None) -> bool:
+        """Top1 命中是否不足以支撑回答（拒答判定，架构 §15.5 v0.8 两档规则）。
+
+        哈希后端（无语义）：双条件——BM25 也无命中**且**向量分低于噪声门槛才拒答。
+        哈希向量分本身是噪声，可答题的向量分同样过不了门槛，只看向量会全部误拒。
+        语义后端（bge-m3 等）：单条件——Top1 向量分低于标定阈值即拒答。
+        bge-m3 下领域外问题仍常因词面重叠产生 BM25 命中（S9 实测拒答题 BM25 rank
+        0–25 与可答题不可分），双条件的第一条恒不成立导致全部漏拒。
+        """
+        if top is None:
+            return True
+        if self._embedder.name.startswith("hash-embed"):
+            return top.bm25_rank == 0 and top.vector_score < self.min_vector_score()
+        return top.vector_score < self.min_vector_score()
 
 
 def _competition_ranks(hits: list[tuple[int, float]]) -> dict[int, int]:

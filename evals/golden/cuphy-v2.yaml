@@ -1,0 +1,252 @@
+# 金标准集 cuphy-v2（S9-b 扩容：50+ 题拒答阈值重标定）
+#
+# 规则（10.9.1.5）：本文件版本化、只增不改；改题必须升版本号另立文件。
+# 与 cuphy-v1 的关系：v1 的 20 问（Q01–Q16 / R01–R04）在本集中**逐字保留**，
+# 新增 Q17–Q40（24 检索）与 R05–R16（12 拒答），共 56 问。
+# 出题依据：cuphy 快照 4f65f97c 的事实层（模块 106 / 文件 1019 / 构建目标 130 /
+# 测试 733 / 配置事实 396）与已发布 91 页 Wiki（S6.5 交付）。
+#
+# 字段：
+#   question       检索/问答原文（模拟真实工程师问法）
+#   expect_refused 资料不足应拒答的题（此时不填 expect_any）
+#   expect_any     期望资料：page_id 精确匹配，或文件路径（以 / 结尾按前缀匹配）；命中任一即算正确资料
+#   difficulty     easy / medium / hard
+
+set_id: cuphy-v2
+repo_id: cuphy
+description: cuphy 检索与问答扩容集：v1 全部 20 问 + 新增 24 检索题 + 12 拒答题，共 56 问
+questions:
+  # ================================================================ 检索题（40）
+  # ---- 以下 Q01–Q16 为 cuphy-v1 原题，逐字保留（只增不改） ----
+  - id: Q01
+    question: "LDPC 译码在哪个模块实现？"
+    expect_any: ["module/src/cuphy/ldpc", "src/cuphy/ldpc/", "module/util/ldpc"]
+    difficulty: easy
+  - id: Q02
+    question: "PUSCH 信道估计的代码在哪里？"
+    expect_any: ["module/src/cuphy/ch_est", "src/cuphy/ch_est/", "examples/ch_est/"]
+    difficulty: easy
+  - id: Q03
+    question: "Polar 编码器的实现文件是什么？"
+    expect_any: ["module/src/cuphy/polar_encoder", "src/cuphy/polar_encoder/"]
+    difficulty: easy
+  - id: Q04
+    question: "CRC 校验和附着在哪一部分实现？"
+    expect_any: ["module/src/cuphy/crc", "src/cuphy/crc/", "module/test/crc"]
+    difficulty: easy
+  - id: Q05
+    question: "软解调 soft demapper 的实现在哪？"
+    expect_any: ["module/src/cuphy/soft_demapper", "src/cuphy/soft_demapper/"]
+    difficulty: medium
+  - id: Q06
+    question: "信道均衡 channel equalizer 在哪个模块？"
+    expect_any: ["module/src/cuphy/channel_eq", "src/cuphy/channel_eq/"]
+    difficulty: easy
+  - id: Q07
+    question: "PRACH 接收机的处理流程在哪？"
+    expect_any: ["module/src/cuphy/prach_receiver", "src/cuphy/prach_receiver/", "module/test/prach_receiver"]
+    difficulty: medium
+  - id: Q08
+    question: "频偏和定时偏移估计（CFO/TA）在哪实现？"
+    expect_any: ["module/src/cuphy/cfo_ta_est", "src/cuphy/cfo_ta_est/"]
+    difficulty: medium
+  - id: Q09
+    question: "PUCCH format 3 的前端处理在哪？"
+    expect_any: ["module/src/cuphy/pucch_F3_front_end", "module/examples/pucch_F234_uci_seg"]
+    difficulty: hard
+  - id: Q10
+    question: "解扰 descrambling 的代码位置？"
+    expect_any: ["module/src/cuphy/descrambling", "src/cuphy/descrambling/"]
+    difficulty: medium
+  - id: Q11
+    question: "cuphy 主库的 CMake 构建目标在哪里定义？"
+    expect_any: ["build", "src/cuphy/CMakeLists.txt", "module/src/cuphy"]
+    difficulty: medium
+  - id: Q12
+    question: "HDF5 数据读写的封装在哪？"
+    expect_any: ["module/src/cuphy_hdf5", "src/cuphy_hdf5/"]
+    difficulty: easy
+  - id: Q13
+    question: "CRC 相关的测试可执行程序是哪个，在哪定义？"
+    expect_any: ["module/test/crc", "test/crc/", "test"]
+    difficulty: medium
+  - id: Q14
+    question: "信道估计示例 chest_trt.yaml 配置文件里有哪些字段？"
+    expect_any: ["config", "examples/ch_est/chest_trt.yaml", "module/src/cuphy/ch_est"]
+    difficulty: hard
+  - id: Q15
+    question: "下行速率匹配 rate matching 在哪实现？"
+    expect_any: ["module/src/cuphy/dl_rate_matching", "module/test/rate_matching", "module/util/ldpc"]
+    difficulty: medium
+  - id: Q16
+    question: "UCI on PUSCH 的 CSI 控制逻辑在哪？"
+    expect_any: ["module/src/cuphy/uci_on_pusch", "module/test/uciOnPusch_csi2Ctrl"]
+    difficulty: hard
+  # ---- 以下 Q17–Q40 为 S9-b 新增（依据事实层实际内容出题） ----
+  - id: Q17
+    question: "日志库 nvlog 的实现代码在哪个目录？"
+    expect_any: ["module/nvlog/src", "nvlog/src/"]
+    difficulty: easy
+  - id: Q18
+    note: "env 事实：AERIAL_LOG_PATH 由 nvlog/src/nvlog.cpp 读取"
+    question: "AERIAL_LOG_PATH 这个环境变量在哪里被读取？"
+    expect_any: ["nvlog/src/nvlog.cpp", "module/nvlog/src", "module/nvlog/include"]
+    difficulty: hard
+  - id: Q19
+    note: "env 事实：LDPC_USE_HALF 由 examples/common/datasets.cpp getenv"
+    question: "LDPC_USE_HALF 环境变量在哪读取、控制什么？"
+    expect_any: ["examples/common/datasets.cpp", "module/examples/common", "config/overview"]
+    difficulty: hard
+  - id: Q20
+    question: "nvlog 日志库怎么配置、有哪些配置项？"
+    expect_any: ["config/overview", "module/nvlog/include", "nvlog/"]
+    difficulty: medium
+  - id: Q21
+    note: "yaml 配置事实：util/ldpc/ldpc2_decoder_bands.yaml"
+    question: "LDPC 译码器的 band 配置文件 ldpc2_decoder_bands.yaml 是干什么的？"
+    expect_any: ["module/util/ldpc", "util/ldpc/"]
+    difficulty: medium
+  - id: Q22
+    question: "HDF5 的单元测试在哪个目录？"
+    expect_any: ["module/test/hdf5", "test/hdf5/"]
+    difficulty: easy
+  - id: Q23
+    question: "块浮点压缩 bfc 的实现在哪？"
+    expect_any: ["module/src/cuphy/bfc", "src/cuphy/bfc/", "module/test/bfc"]
+    difficulty: medium
+  - id: Q24
+    question: "随机数生成 rng 模块在哪？"
+    expect_any: ["module/src/cuphy/rng", "src/cuphy/rng/", "test/rng/"]
+    difficulty: easy
+  - id: Q25
+    question: "TensorRT engine 的封装 trt_engine 在哪实现？"
+    expect_any: ["module/src/cuphy/trt_engine", "src/cuphy/trt_engine/"]
+    difficulty: medium
+  - id: Q26
+    question: "PUSCH 的噪声与干扰估计（noise intf est）在哪？"
+    expect_any: ["module/src/cuphy/pusch_noise_intf_est", "src/cuphy/pusch_noise_intf_est/", "module/test/pusch_noise_intf_est"]
+    difficulty: medium
+  - id: Q27
+    question: "PUSCH 的 RSSI 测量在哪实现？"
+    expect_any: ["module/src/cuphy/pusch_rssi", "src/cuphy/pusch_rssi/", "module/test/pusch_rssi"]
+    difficulty: easy
+  - id: Q28
+    question: "SRS 信道估计 srs_chEst 的代码在哪？"
+    expect_any: ["module/src/cuphy/srs_chEst", "src/cuphy/srs_chEst/"]
+    difficulty: medium
+  - id: Q29
+    question: "PDCCH 下行控制信道的处理实现在哪？"
+    expect_any: ["module/src/cuphy/pdcch", "src/cuphy/pdcch/", "examples/pdcch/"]
+    difficulty: medium
+  - id: Q30
+    question: "极化码译码 polar decoder 在哪实现？"
+    expect_any: ["module/src/cuphy/polar_decoder", "src/cuphy/polar_decoder/", "module/test/polar_decoder"]
+    difficulty: easy
+  - id: Q31
+    question: "调制映射 modulation mapper 的代码在哪？"
+    expect_any: ["module/src/cuphy/modulation_mapper", "src/cuphy/modulation_mapper/", "module/test/modulation_mapper"]
+    difficulty: easy
+  - id: Q32
+    question: "cuphy_channels 库是干什么的，代码在哪？"
+    expect_any: ["module/src/cuphy_channels", "src/cuphy_channels/"]
+    difficulty: medium
+  - id: Q33
+    question: "BFW 数据压缩解压缩（compression_decompression）在哪实现？"
+    expect_any: ["src/compression_decompression/", "module/src/other"]
+    difficulty: medium
+  - id: Q34
+    question: "aerial_utils 工具库在哪？"
+    expect_any: ["module/util/aerial_utils", "util/aerial_utils/"]
+    difficulty: easy
+  - id: Q35
+    question: "CSI-RS 参考信号的实现代码在哪？"
+    expect_any: ["src/cuphy/csirs/", "src/cuphy/csirs_rx/"]
+    difficulty: medium
+  - id: Q36
+    question: "cfo_ta_est 示例程序的处理流程是什么样的？"
+    expect_any: ["flow/examples/cfo_ta_est/cuphy_ex_cfo_ta_est", "examples/cfo_ta_est/"]
+    difficulty: medium
+  - id: Q37
+    note: "yaml 配置事实：chest_trt.yaml 的 inputs/outputs 字段"
+    question: "chest_trt.yaml 里 inputs 和 outputs 张量的 dims 字段在哪能查到？"
+    expect_any: ["examples/ch_est/chest_trt.yaml", "config/overview", "examples/ch_est/"]
+    difficulty: hard
+  - id: Q38
+    question: "nvlog 自己的测试代码在哪？"
+    expect_any: ["module/nvlog/other", "nvlog/test/"]
+    difficulty: medium
+  - id: Q39
+    question: "cuphy 对外的主 API 头文件 cuphy_api.h 在哪？"
+    expect_any: ["interface/src/cuphy/cuphy_api", "src/cuphy/cuphy_api.h"]
+    difficulty: easy
+  - id: Q40
+    question: "生成 PUSCH BLER 曲线的示例 gen_pusch_bler_curve 在哪？"
+    expect_any: ["examples/gen_pusch_bler_curve/", "module/examples/other"]
+    difficulty: medium
+  # ================================================================ 拒答题（16）
+  # ---- 以下 R01–R04 为 cuphy-v1 原题，逐字保留（只增不改） ----
+  - id: R01
+    question: "这个项目怎么部署到 Kubernetes 集群上？"
+    expect_refused: true
+    difficulty: easy
+  - id: R02
+    question: "Aerial CUDA RAN 库的商业授权怎么购买，价格是多少？"
+    expect_refused: true
+    difficulty: easy
+  - id: R03
+    question: "cuphy PUSCH 的功耗数据跟竞品对比怎么样？"
+    expect_refused: true
+    difficulty: medium
+  - id: R04
+    question: "3GPP TS 38.211 的完整章节目录列一下？"
+    expect_refused: true
+    difficulty: medium
+  # ---- 以下 R05–R16 为 S9-b 新增（覆盖更多领域外问法，含部分词面易混淆的 hard 题） ----
+  - id: R05
+    question: "怎么安装和配置 CUDA Toolkit 与显卡驱动？"
+    expect_refused: true
+    difficulty: easy
+  - id: R06
+    question: "Aerial SDK 的商业支持和技术服务合同找谁签？"
+    expect_refused: true
+    difficulty: easy
+  - id: R07
+    question: "cuphy 和 sionna、MATLAB 5G Toolbox 的性能对比如何？"
+    expect_refused: true
+    difficulty: hard
+  - id: R08
+    question: "这个项目下一个版本的 roadmap 和发布计划是什么？"
+    expect_refused: true
+    difficulty: easy
+  - id: R09
+    question: "5G NR 标准从 Rel-15 到 Rel-18 的演进历史系统讲一下？"
+    expect_refused: true
+    difficulty: hard
+  - id: R10
+    question: "怎么给上游开源项目提交 PR，CLA 签署流程是什么？"
+    expect_refused: true
+    difficulty: medium
+  - id: R11
+    question: "cuphy 在云端 GPU 集群部署一个月成本大概多少？"
+    expect_refused: true
+    difficulty: medium
+  - id: R12
+    question: "推荐几份用 PyTorch 从零实现 PUSCH 接收机的教程？"
+    expect_refused: true
+    difficulty: hard
+  - id: R13
+    question: "nvlog 日志库的作者是谁，怎么联系？"
+    expect_refused: true
+    difficulty: medium
+  - id: R14
+    question: "这个仓库的 GitHub star 数和 issue 平均响应时间怎么样？"
+    expect_refused: true
+    difficulty: easy
+  - id: R15
+    question: "O-RAN 联盟的架构演进和白盒化趋势讲一下？"
+    expect_refused: true
+    difficulty: hard
+  - id: R16
+    question: "有哪些学习 5G 物理层开发的在线课程推荐？"
+    expect_refused: true
+    difficulty: easy

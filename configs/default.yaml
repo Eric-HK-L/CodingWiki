@@ -49,5 +49,5 @@ retrieval:
   top_k: 20
   keyword_weight: 0.5
   vector_weight: 0.5
-  min_vector_score: 0.35  # 真实语义模型的拒答门槛；哈希后端用规模自适应公式
+  min_vector_score: 0.595  # 真实语义模型的拒答门槛（S9-b 按 cuphy-v2 实测标定）；哈希后端用规模自适应公式
   rerank_pool: 20
