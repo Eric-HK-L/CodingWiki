@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from codingwiki.backends.protocol import ModelBackend
+    from codingwiki.domain.eval import EvalReport, QuestionResult
     from codingwiki.retrieval import HybridSearcher
 
 from codingwiki import __version__
@@ -869,8 +870,26 @@ def _cmd_eval(args: argparse.Namespace) -> int:
                 f"{q.question_id}（期望{'拒答' if q.expect_refused else '回答'}）" for q in wrong
             )
         )
+    print(_top1_distribution(report))
     print(f"报告: {path}")
     return int(ExitCode.OK)
+
+
+def _top1_distribution(report: EvalReport) -> str:
+    """两类题的 Top1 向量分分布（拒答阈值标定依据，架构 §15.5 v0.8）。"""
+
+    def _span(rows: list[QuestionResult]) -> str:
+        if not rows:
+            return "n/a"
+        scores = [q.top_vector_score for q in rows]
+        return f"[{min(scores):.3f}, {max(scores):.3f}]"
+
+    refused = [q for q in report.per_question if q.expect_refused]
+    answerable = [q for q in report.per_question if not q.expect_refused]
+    return (
+        f"  Top1 向量分分布: 拒答题 {_span(refused)} / 可答题 {_span(answerable)}"
+        "（阈值标定取两段之间的分隔点）"
+    )
 
 
 def _query_rows(

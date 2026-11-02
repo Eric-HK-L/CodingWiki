@@ -60,6 +60,9 @@ class QuestionResult(_WikiModel):
     ndcg: float = Field(default=0.0, ge=0.0, le=1.0)
     citation_total: int = Field(default=0, ge=0)
     citation_valid: int = Field(default=0, ge=0)
+    # Top1 命中特征（拒答阈值标定与 delta 对比用；无任何命中时保持默认值）
+    top_vector_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    top_bm25_rank: int = Field(default=0, ge=0)  # 0 = Top1 无 BM25 命中
 
 
 class EvalReport(_WikiModel):

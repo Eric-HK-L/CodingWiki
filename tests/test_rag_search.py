@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from codingwiki.domain.rag import Chunk
+from codingwiki.domain.rag import Chunk, SearchHit
 from codingwiki.retrieval import HashEmbedding, HybridSearcher
 
 
@@ -97,6 +97,64 @@ def test_min_vector_score_scales_with_corpus_size() -> None:
     big = _searcher([_chunk(f"c{i}", "t", "x") for i in range(30000)])
     assert big.min_vector_score() > small.min_vector_score()
     assert 0.0 < small.min_vector_score() < 1.0
+
+
+# ---------------------------------------------------------------- 拒答判定两档规则
+
+
+class _FakeSemanticEmbedder:
+    """名字不带 hash-embed 的假语义嵌入：按内容给正交向量，分数可控。"""
+
+    @property
+    def name(self) -> str:
+        return "fake-bge-d4"
+
+    @property
+    def dim(self) -> int:
+        return 4
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [
+            [1.0, 0.0, 0.0, 0.0] if "ldpc" in t.lower() else [0.0, 1.0, 0.0, 0.0] for t in texts
+        ]
+
+
+def test_is_refusal_semantic_single_condition() -> None:
+    # 语义后端：单条件——向量分低于标定阈值即拒答，BM25 有命中也不例外
+    # （S9 实测：领域外问题 BM25 仍常命中，双条件恒不成立）
+    embedder = _FakeSemanticEmbedder()
+    chunks = [_chunk("c1", "ldpc", "ldpc decoder ldpc")]
+    vectors = embedder.embed([f"{c.title}\n{c.text}" for c in chunks])
+    # 查询 "decoder"：BM25 命中块，但向量与块正交（cos=0）——复现 S9 漏拒场景
+    searcher = HybridSearcher(chunks, vectors, embedder, min_vector_score=0.60)
+    hits = searcher.search("decoder")
+    assert hits and hits[0].bm25_rank >= 1  # BM25 有命中
+    assert hits[0].vector_score < 0.60
+    assert searcher.is_refusal(hits[0])  # 语义单条件 → 拒答
+
+    # 查询 "ldpc"：向量 cos=1.0 过阈值 → 不拒答
+    searcher2 = HybridSearcher(chunks, vectors, embedder, min_vector_score=0.60)
+    assert not searcher2.is_refusal(searcher2.search("ldpc")[0])
+
+
+def test_is_refusal_semantic_none_top() -> None:
+    embedder = _FakeSemanticEmbedder()
+    searcher = HybridSearcher([], [], embedder, min_vector_score=0.60)
+    assert searcher.is_refusal(None)
+
+
+def test_is_refusal_hash_keeps_dual_condition() -> None:
+    # 哈希后端：双条件——BM25 有命中时即使向量分低于噪声门槛也不拒答
+    # （哈希向量分是噪声，可答题同样过不了向量门槛，单看向量会全部误拒）
+    chunks = [_chunk("c1", "ldpc", "ldpc decoder ldpc")]
+    searcher = _searcher(chunks)
+    hits = searcher.search("ldpc")
+    assert hits and hits[0].bm25_rank >= 1
+    assert not searcher.is_refusal(hits[0])
+
+    # 双条件的另一半：无 BM25 命中且向量分低于门槛 → 拒答
+    hit = SearchHit(chunk=chunks[0], score=0.0, bm25_rank=0, vector_rank=0, vector_score=0.0)
+    assert searcher.is_refusal(hit)
 
 
 class _FakeReranker:

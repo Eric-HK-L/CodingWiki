@@ -175,6 +175,26 @@ def test_harness_runs_and_computes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert len(report.per_question) == 3
 
 
+def test_harness_records_top1_features(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 每题必须记录 Top1 命中特征（拒答阈值标定依据，架构 §15.5 v0.8）
+    chunks = [
+        _chunk("c1", "ldpc 译码模块 LDPC decoder", page_id="module/ldpc"),
+        _chunk("c2", "完全无关的内容 xyzzy", file="misc/readme.txt"),
+    ]
+    harness = _harness(tmp_path, chunks, monkeypatch)
+    report = harness.run(_golden(), top_k=3)
+
+    by_id = {q.question_id: q for q in report.per_question}
+    # 拒答题 R1 也会被采集特征（哈希嵌入下 query 词面无命中 → 特征为默认零值）
+    r1 = by_id["R1"]
+    assert r1.top_vector_score >= 0.0
+    assert r1.top_bm25_rank >= 0
+    # 可答题 Q1：命中资料页，Top1 向量分与 BM25 rank 均非零
+    q1 = by_id["Q1"]
+    assert q1.top_vector_score > 0.0
+    assert q1.top_bm25_rank >= 1
+
+
 def test_harness_counts_misses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     chunks = [
         _chunk("c1", "ldpc 译码模块 LDPC decoder", page_id="module/ldpc"),

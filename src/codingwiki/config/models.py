@@ -171,8 +171,9 @@ class RetrievalSettings(_StrictModel):
     top_k: int = Field(default=20, ge=1, le=100)
     keyword_weight: float = Field(default=0.5, ge=0.0, le=1.0)
     vector_weight: float = Field(default=0.5, ge=0.0, le=1.0)
-    # 真实语义模型下的拒答门槛（哈希后端改用规模自适应公式，不受此值影响）
-    min_vector_score: float = Field(default=0.35, ge=0.0, le=1.0)
+    # 真实语义模型下的拒答门槛（哈希后端改用规模自适应公式，不受此值影响）。
+    # S9-b 按 cuphy-v2（56 问）实测标定：分隔区间 (0.5907, 0.5999)，取中点 0.595。
+    min_vector_score: float = Field(default=0.595, ge=0.0, le=1.0)
     rerank_pool: int = Field(default=20, ge=1, le=200)
 
     @model_validator(mode="after")

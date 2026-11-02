@@ -50,11 +50,9 @@ class AnswerPipeline:
         hits = self._searcher.search(question, top_k=top_k)
         passages = _to_passages(hits)
 
-        # 拒答：没有任何命中，或关键词通道完全无命中且向量分数未过噪声门槛
+        # 拒答判定走 searcher.is_refusal()（架构 §15.5 v0.8：哈希双条件 / 语义单条件）
         top = hits[0] if hits else None
-        if top is None or (
-            top.bm25_rank == 0 and top.vector_score < self._searcher.min_vector_score()
-        ):
+        if self._searcher.is_refusal(top):
             refusal = "根据现有资料无法确认。建议换用更具体的函数名/配置名，或先构建更完整的 Wiki。"
             return AskOutcome(
                 question=question,
