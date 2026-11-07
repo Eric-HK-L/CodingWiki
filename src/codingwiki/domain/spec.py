@@ -218,6 +218,51 @@ class ValidationReport(_WikiModel):
         return bool(self.blockers)
 
 
+class ImpactAnalysis(_WikiModel):
+    """确定性影响面（架构 阶段2 §5.2）。全部为排序去重后的稳定列表。"""
+
+    requirement_id: str = Field(pattern=r"^[RN]-\d{3}$")
+    files: list[str] = Field(default_factory=list)
+    interfaces: list[str] = Field(default_factory=list)
+    callers: list[str] = Field(default_factory=list)
+    config: list[str] = Field(default_factory=list)
+    build: list[str] = Field(default_factory=list)
+    tests: list[str] = Field(default_factory=list)
+
+
+class RequirementEvidence(_WikiModel):
+    """一条需求的证据包：至少 1 条可定位证据，附确定性影响面。"""
+
+    requirement_id: str = Field(pattern=r"^[RN]-\d{3}$")
+    items: list[EvidenceItem] = Field(min_length=1)
+    impact: ImpactAnalysis
+
+    @model_validator(mode="after")
+    def _impact_matches(self) -> RequirementEvidence:
+        if self.impact.requirement_id != self.requirement_id:
+            raise ValueError(
+                f"影响面归属 {self.impact.requirement_id} 与证据 {self.requirement_id} 不一致"
+            )
+        return self
+
+
+class EvidenceBundle(_WikiModel):
+    """一份需求文档/一份 Spec 的证据包（evidence.json）。不含时间戳，可逐字节复算。"""
+
+    repo_id: str = Field(min_length=1)
+    snapshot_id: str = Field(min_length=1)
+    doc_id: str = Field(min_length=1)
+    spec_id: str = ""
+    requirements: list[RequirementEvidence] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _requirement_ids_unique(self) -> EvidenceBundle:
+        ids = [item.requirement_id for item in self.requirements]
+        if len(ids) != len(set(ids)):
+            raise ValueError("证据包内需求编号重复")
+        return self
+
+
 class SpecDocument(_WikiModel):
     """一份完整 Spec。元信息由系统写入，不采信模型输出。"""
 
@@ -287,12 +332,15 @@ __all__ = [
     "AcceptanceCriterion",
     "DesignTask",
     "DocSection",
+    "EvidenceBundle",
     "EvidenceItem",
     "EvidenceKind",
     "ExtractionResult",
+    "ImpactAnalysis",
     "OpenQuestion",
     "QuestionStatus",
     "Requirement",
+    "RequirementEvidence",
     "RequirementKind",
     "RequirementPriority",
     "SPEC_SECTIONS",
