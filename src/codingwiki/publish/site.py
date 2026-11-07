@@ -19,9 +19,13 @@ import re
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from codingwiki.domain.front_matter import parse_front_matter
 from codingwiki.domain.wiki import VersionIndex
+
+if TYPE_CHECKING:
+    from codingwiki.domain.dashboard import DashboardData
 
 _PAGE_TYPES = (
     "module",
@@ -128,6 +132,7 @@ def build_site(
     payload: list[tuple[str, str, str]],
     workdir: Path,
     profile: Mapping[str, object],
+    dashboard: DashboardData | None = None,
 ) -> Path:
     """生成 site/；先写临时目录再原子替换，失败不会破坏旧站点。"""
     tmp = version_dir / "site.tmp"
@@ -186,9 +191,23 @@ def build_site(
         version=index.version_id,
         root="index.html",
         css="style.css",
-        body=_profile_html(index, profile) + _search_html() + home_content,
+        body=_profile_html(index, profile)
+        + _dashboard_link(dashboard is not None)
+        + _search_html()
+        + home_content,
     )
     (tmp / "index.html").write_text(home_html, encoding="utf-8")
+
+    if dashboard is not None:
+        dashboard_html = _layout(
+            title=f"覆盖率看板 · {index.repo_id}",
+            repo=index.repo_id,
+            version=index.version_id,
+            root="index.html",
+            css="style.css",
+            body=_dashboard_html(dashboard),
+        )
+        (tmp / "dashboard.html").write_text(dashboard_html, encoding="utf-8")
 
     search_pages = [
         {
@@ -261,6 +280,87 @@ def _search_html() -> str:
         '<input id="q" type="search" placeholder="输入模块名、符号或配置键">'
         '</div><ul id="results"></ul></section>'
         '<script src="search.js"></script>'
+    )
+
+
+def _dashboard_link(available: bool) -> str:
+    if not available:
+        return ""
+    return (
+        '<section><p><a href="dashboard.html">'
+        "覆盖率看板（C0–C3 矩阵 / 评测 / 任务）</a></p></section>"
+    )
+
+
+def _dashboard_html(data: DashboardData) -> str:
+    """看板页（架构 §19.1）：版本信息 + 覆盖矩阵 + 评测 + 最近任务。"""
+
+    def _cell(covered: int, total: int) -> str:
+        pct = f"（{covered / total:.0%}）" if total else ""
+        return f"{covered}/{total}{pct}"
+
+    coverage_rows = "".join(
+        "<tr>"
+        f"<td>{_esc(row.module)}</td>"
+        f"<td>{_cell(row.files_total, row.files_total)}</td>"
+        f"<td>{_cell(row.files_covered, row.files_total)}</td>"
+        f"<td>{_cell(row.public_covered, row.public_total)}</td>"
+        f"<td>{_cell(row.entries_covered, row.entries_total)}</td>"
+        "</tr>"
+        for row in data.coverage
+    )
+    coverage_table = (
+        "<table><thead><tr><th>模块</th><th>C0 已登记</th>"
+        "<th>C1 已说明（文件）</th><th>C2 已说清接口（公开符号）</th>"
+        "<th>C3 已说清流程（入口）</th></tr></thead>"
+        f"<tbody>{coverage_rows}</tbody></table>"
+    )
+
+    if data.eval_summary is not None:
+        evaluation = data.eval_summary
+
+        def _metric(value: float | None) -> str:
+            return "n/a" if value is None else f"{value:.1%}"
+
+        eval_body = (
+            "<table><tbody>"
+            f"<tr><td>金标准集</td><td>{_esc(evaluation.set_id)}</td></tr>"
+            f"<tr><td>Recall@k</td><td>{_metric(evaluation.recall_at_k)}</td></tr>"
+            f"<tr><td>MRR</td><td>{_metric(evaluation.mrr)}</td></tr>"
+            f"<tr><td>nDCG@k</td><td>{_metric(evaluation.ndcg_at_k)}</td></tr>"
+            f"<tr><td>拒答准确率</td><td>{_metric(evaluation.refusal_accuracy)}</td></tr>"
+            f"<tr><td>出处有效率</td><td>{_metric(evaluation.citation_valid_rate)}</td></tr>"
+            "</tbody></table>"
+        )
+    else:
+        eval_body = "<p>未评测（运行 codingwiki eval 后重新发布可见）</p>"
+
+    if data.job_summary is not None:
+        job = data.job_summary
+        finished = job.finished_at.isoformat() if job.finished_at else "-"
+        job_body = (
+            "<table><tbody>"
+            f"<tr><td>最近任务</td><td>{_esc(job.job_id)}（{_esc(job.status)}）</td></tr>"
+            f"<tr><td>快照</td><td>{_esc(job.snapshot_id or '-')}</td></tr>"
+            f"<tr><td>结束时间</td><td>{_esc(finished)}</td></tr>"
+            + (f"<tr><td>错误</td><td>{_esc(job.error)}</td></tr>" if job.error else "")
+            + "</tbody></table>"
+        )
+    else:
+        job_body = "<p>未运行（运行 codingwiki run 后重新发布可见）</p>"
+
+    pages_line = f"{data.pages_total}（verified {data.pages_verified} / stale {data.pages_stale}）"
+    return (
+        "<section><h2>版本</h2>"
+        "<table><tbody>"
+        f"<tr><td>版本</td><td>{_esc(data.version_id)}</td></tr>"
+        f"<tr><td>快照</td><td>{_esc(data.snapshot_id)}</td></tr>"
+        f"<tr><td>页面</td><td>{pages_line}</td></tr>"
+        f"<tr><td>证据总数</td><td>{data.evidence_total}</td></tr>"
+        "</tbody></table></section>"
+        f"<section><h2>覆盖率矩阵（缺口 = 每格未覆盖数）</h2>{coverage_table}</section>"
+        f"<section><h2>检索评测</h2>{eval_body}</section>"
+        f"<section><h2>最近任务（codingwiki run）</h2>{job_body}</section>"
     )
 
 

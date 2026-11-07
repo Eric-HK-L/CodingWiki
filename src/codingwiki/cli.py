@@ -138,6 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--repo", required=True, help="仓库 ID")
     status_parser.set_defaults(handler=_cmd_wiki_status)
 
+    coverage_parser = wiki_subcommands.add_parser(
+        "coverage", help="覆盖率看板：模块 × C0–C3 矩阵 + 评测/任务摘要（S11）"
+    )
+    coverage_parser.add_argument("--repo", required=True, help="仓库 ID")
+    coverage_parser.set_defaults(handler=_cmd_wiki_coverage)
+
     stale_parser = wiki_subcommands.add_parser(
         "stale", help="按最新快照与当前版本的差异，把受影响页面标 stale"
     )
@@ -489,7 +495,7 @@ def _cmd_wiki_publish(args: argparse.Namespace) -> int:
         "tests": len(facts.tests),
         "config_facts": len(facts.config_facts),
     }
-    index = store.publish(facts.snapshot_id, workdir=workdir, site_profile=profile)
+    index = store.publish(facts.snapshot_id, workdir=workdir, site_profile=profile, facts=facts)
     counts = index.status_counts
     site = store.version_dir(index.version_id) / "site" / "index.html"
     print(
@@ -497,6 +503,51 @@ def _cmd_wiki_publish(args: argparse.Namespace) -> int:
         f"verified={counts.get('verified', 0)}"
     )
     print(f"站点: {site}（离线打开 index.html，首页 2 次点击可达模块页）")
+    print(f"看板: {site.parent / 'dashboard.html'}")
+    return int(ExitCode.OK)
+
+
+def _cmd_wiki_coverage(args: argparse.Namespace) -> int:
+    from codingwiki.publish import FilesystemPageStore
+    from codingwiki.publish.dashboard import build_current_dashboard
+
+    facts = load_facts_or_raise(args.repo)
+    store = FilesystemPageStore(args.repo)
+    data = build_current_dashboard(args.repo, facts, store)
+
+    print(f"看板: repo={data.repo_id}, version={data.version_id}, snapshot={data.snapshot_id}")
+    print(
+        f"页面: {data.pages_total}（verified {data.pages_verified} / stale {data.pages_stale}），"
+        f"证据总数 {data.evidence_total}"
+    )
+    print("覆盖率矩阵（缺口 = 每格未覆盖数）:")
+    header = f"  {'模块':<40} {'C0 登记':>10} {'C1 说明':>12} {'C2 接口':>14} {'C3 流程':>10}"
+    print(header)
+    for row in data.coverage:
+        print(
+            f"  {row.module:<40} "
+            f"{row.files_total:>10} "
+            f"{row.files_covered:>6}/{row.files_total:<5} "
+            f"{row.public_covered:>7}/{row.public_total:<6} "
+            f"{row.entries_covered:>5}/{row.entries_total:<4}"
+        )
+    if data.eval_summary is not None:
+        evaluation = data.eval_summary
+        print(
+            f"评测: set={evaluation.set_id}, "
+            f"Recall@k={_fmt_rate(evaluation.recall_at_k)}, "
+            f"拒答准确率={_fmt_rate(evaluation.refusal_accuracy)}, "
+            f"出处有效率={_fmt_rate(evaluation.citation_valid_rate)}"
+        )
+    else:
+        print("评测: 未评测（codingwiki eval 后重新发布可见）")
+    if data.job_summary is not None:
+        print(
+            f"最近任务: {data.job_summary.job_id}（{data.job_summary.status}）"
+            + (f"，错误: {data.job_summary.error}" if data.job_summary.error else "")
+        )
+    else:
+        print("最近任务: 未运行（codingwiki run 后重新发布可见）")
     return int(ExitCode.OK)
 
 
