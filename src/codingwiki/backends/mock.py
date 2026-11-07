@@ -48,6 +48,8 @@ class MockBackend:
 
     def run(self, packet: TaskPacket) -> BackendResult:
         started = time.monotonic()
+        if _is_spec_extract(packet.workspace):
+            return self._run_spec_extract(packet, started)
         if (packet.workspace / "context" / "question.txt").is_file():
             return self._run_ask(packet, started)
         try:
@@ -97,6 +99,47 @@ class MockBackend:
             status=BackendStatus.SUCCEEDED,
             exit_code=0,
             output_files=outputs,
+            duration_ms=_elapsed_ms(started),
+            tokens_in=_rough_tokens(packet.workspace),
+            tokens_out=_rough_tokens(packet.output_dir),
+            model=MODEL_NAME,
+        )
+
+    # ---------------------------------------------------------------- 需求抽取
+
+    def _run_spec_extract(self, packet: TaskPacket, started: float) -> BackendResult:
+        """确定性需求抽取：只复制文档里已有的句子/条目，不补写内容。"""
+        try:
+            document = (packet.workspace / "context" / "document.md").read_text(encoding="utf-8")
+            raw_sections = json.loads(
+                (packet.workspace / "context" / "sections.json").read_text(encoding="utf-8")
+            )
+            if not isinstance(raw_sections, list):
+                raise ValueError("sections.json 顶层必须是数组")
+            sections = [item for item in raw_sections if isinstance(item, dict)]
+            requirements, questions = _spec_extract(document, sections)
+        except (OSError, ValueError) as exc:
+            return BackendResult(
+                status=BackendStatus.FAILED,
+                duration_ms=_elapsed_ms(started),
+                model=MODEL_NAME,
+                error=f"需求抽取任务包不可读: {exc}",
+            )
+
+        packet.output_dir.mkdir(parents=True, exist_ok=True)
+        (packet.output_dir / "extract.json").write_text(
+            json.dumps(
+                {"requirements": requirements, "questions": questions},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return BackendResult(
+            status=BackendStatus.SUCCEEDED,
+            exit_code=0,
+            output_files=["output/extract.json"],
             duration_ms=_elapsed_ms(started),
             tokens_in=_rough_tokens(packet.workspace),
             tokens_out=_rough_tokens(packet.output_dir),
@@ -737,6 +780,102 @@ def _rough_tokens(path: Path) -> int:
     return int(total * 0.6)
 
 
+# ---------------------------------------------------------------- 需求抽取（mock）
+
+
+SPEC_EXTRACT_TASK = "spec_extract"
+
+
+def _is_spec_extract(workspace: Path) -> bool:
+    meta = workspace / "meta.json"
+    if not meta.is_file():
+        return False
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("task_type") == SPEC_EXTRACT_TASK
+
+
+def _spec_extract(
+    document: str, sections: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """只搬运原文：需求取条目标题下的首句或条目，验收标准取「验收标准」后的条目。"""
+    lines = document.splitlines()
+    requirements: list[dict[str, Any]] = []
+    questions: list[dict[str, Any]] = []
+    for section in sections:
+        path = str(section.get("path", ""))
+        if "开放问题" in path:
+            for text in _section_bullets(lines, section):
+                questions.append({"question": text, "impact": "", "owner": ""})
+            continue
+        if "功能需求" not in path:
+            continue
+        kind = "non_functional" if "非功能" in path else "functional"
+        current: dict[str, Any] | None = None
+        acceptance_mode = False
+        for raw in _section_body(lines, section):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith(("```", "~~~")):
+                continue
+            if stripped.startswith("验收标准"):
+                acceptance_mode = True
+                continue
+            bullet = _bullet_text(stripped)
+            if bullet is not None:
+                if acceptance_mode and current is not None:
+                    current["acceptance"].append(bullet)
+                else:
+                    current = _new_requirement(bullet, path, kind)
+                    requirements.append(current)
+                    acceptance_mode = False
+                continue
+            if not acceptance_mode and current is None:
+                current = _new_requirement(stripped, path, kind)
+                requirements.append(current)
+    return requirements, questions
+
+
+def _section_body(lines: list[str], section: dict[str, Any]) -> list[str]:
+    start = int(section.get("start_line", 0) or 0)
+    end = int(section.get("end_line", 0) or 0)
+    if start < 1:
+        return []
+    return lines[start : max(end, start)]
+
+
+def _section_bullets(lines: list[str], section: dict[str, Any]) -> list[str]:
+    bullets: list[str] = []
+    for raw in _section_body(lines, section):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(("```", "~~~")):
+            continue
+        bullet = _bullet_text(stripped)
+        if bullet is not None:
+            bullets.append(bullet)
+    return bullets
+
+
+def _bullet_text(line: str) -> str | None:
+    for marker in ("- ", "* ", "+ "):
+        if line.startswith(marker):
+            return line[len(marker) :].strip()
+    return None
+
+
+def _new_requirement(text: str, path: str, kind: str) -> dict[str, Any]:
+    priority = "must" if any(word in text for word in ("必须", "不得", "禁止")) else "should"
+    return {
+        "kind": kind,
+        "text": text,
+        "priority": priority,
+        "source_section": path,
+        "source_quote": text,
+        "acceptance": [],
+    }
+
+
 __all__ = [
     "BACKEND_NAME",
     "FAIL_BAD_CITATION",
@@ -746,4 +885,5 @@ __all__ = [
     "FAIL_MISSING_TITLE",
     "MODEL_NAME",
     "MockBackend",
+    "SPEC_EXTRACT_TASK",
 ]

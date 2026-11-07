@@ -244,6 +244,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.set_defaults(handler=_cmd_run)
 
+    spec_parser = subcommands.add_parser("spec", help="开发 Spec 生成（S12 起）")
+    spec_subcommands = spec_parser.add_subparsers(dest="spec_command", required=True)
+
+    spec_extract_parser = spec_subcommands.add_parser(
+        "extract", help="需求文档 → 原子需求（模型只做原子化与 AC 草拟）"
+    )
+    spec_extract_parser.add_argument("--repo", required=True, help="仓库 ID")
+    spec_extract_parser.add_argument("--doc", required=True, help="需求文档 Markdown 路径")
+    spec_extract_parser.add_argument(
+        "--snapshot", default="", help="绑定快照 ID；空表示取该仓库最近一次 facts 快照"
+    )
+    spec_extract_parser.add_argument(
+        "--backend",
+        choices=["mock", "api"],
+        default="api",
+        help="模型后端：api=真实模型；mock=离线链路测试（不用于质量指标）",
+    )
+    spec_extract_parser.add_argument(
+        "--app-config", default="configs/default.yaml", help="主配置路径（--backend api 时读取）"
+    )
+    spec_extract_parser.set_defaults(handler=_cmd_spec_extract)
+
+    spec_list_parser = spec_subcommands.add_parser("list", help="列出已抽取的需求文档")
+    spec_list_parser.add_argument("--repo", required=True, help="仓库 ID")
+    spec_list_parser.set_defaults(handler=_cmd_spec_list)
+
     return parser
 
 
@@ -616,7 +642,54 @@ def _cmd_wiki_status(args: argparse.Namespace) -> int:
     return int(ExitCode.OK)
 
 
-# ---------------------------------------------------------------- S5 检索与问答
+# ---------------------------------------------------------------- S12 需求抽取
+
+
+def _cmd_spec_extract(args: argparse.Namespace) -> int:
+    from codingwiki.domain.spec import RequirementKind
+    from codingwiki.spec import extract_requirements
+    from codingwiki.spec.ingest import doc_bundle_dir
+
+    snapshot_id = args.snapshot
+    if not snapshot_id:
+        snapshot_id = load_facts_or_raise(args.repo).snapshot_id
+
+    backend, backend_name, model_name = resolve_wiki_backend(args.backend, args.app_config)
+    result = extract_requirements(
+        repo_id=args.repo,
+        doc_path=args.doc,
+        backend=backend,
+        snapshot_id=snapshot_id,
+        backend_name=backend_name,
+        model_name=model_name,
+    )
+    functional = sum(1 for r in result.requirements if r.kind is RequirementKind.FUNCTIONAL)
+    non_functional = len(result.requirements) - functional
+    print(
+        f"已抽取: doc_id={result.doc_id}, requirements={len(result.requirements)}"
+        f"（R={functional}, N={non_functional}）, questions={len(result.questions)}, "
+        f"backend={result.backend}/{result.model}"
+    )
+    print(f"产物: {doc_bundle_dir(args.repo, result.doc_id)}")
+    return int(ExitCode.OK)
+
+
+def _cmd_spec_list(args: argparse.Namespace) -> int:
+    from codingwiki.domain.spec import RequirementKind
+    from codingwiki.spec import load_extractions
+
+    records = load_extractions(args.repo)
+    if not records:
+        print(f"仓库 {args.repo} 暂无需求抽取记录；先执行: codingwiki spec extract --repo ...")
+        return int(ExitCode.OK)
+    for record in records:
+        functional = sum(1 for r in record.requirements if r.kind is RequirementKind.FUNCTIONAL)
+        non_functional = len(record.requirements) - functional
+        print(
+            f"{record.doc_id}\tR={functional}\tN={non_functional}\tQ={len(record.questions)}\t"
+            f"backend={record.backend}/{record.model}\t{record.source_path}"
+        )
+    return int(ExitCode.OK)
 
 
 def _app_config_or_default(path: str) -> AppConfig:
@@ -646,12 +719,16 @@ def _cmd_index_build(args: argparse.Namespace) -> int:
     from codingwiki.publish import FilesystemPageStore
     from codingwiki.retrieval import Bm25Index, ChunkBuilder, FilesystemIndexStore
     from codingwiki.retrieval.registry import create_embedder
+    from codingwiki.spec import load_doc_chunks
 
     facts = load_facts_or_raise(args.repo)
     workdir = wiki_workdir(args.repo, args.config_dir, args.workdir)
     wiki_pages = FilesystemPageStore(args.repo).load_published_pages()
 
     chunks = ChunkBuilder(workdir).build(facts, wiki_pages)
+    # 需求文档块与代码块共用索引，通过 source_types=("doc",) 隔离（架构 阶段2 §4）
+    doc_chunks = load_doc_chunks(args.repo, facts.snapshot_id)
+    chunks += doc_chunks
     if not chunks:
         raise InputError(f"仓库 {args.repo} 没有任何可索引的内容")
 
@@ -684,6 +761,8 @@ def _cmd_index_build(args: argparse.Namespace) -> int:
     )
     if not wiki_pages:
         print("提示: 尚未发布 Wiki 版本，索引只含代码与事实块；wiki publish 后重建可补齐")
+    if doc_chunks:
+        print(f"需求文档块: {len(doc_chunks)}（source_type=doc）")
     return int(ExitCode.OK)
 
 
