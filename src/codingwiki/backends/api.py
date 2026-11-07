@@ -35,6 +35,12 @@ _SYSTEM_PROMPT = """你是代码仓库文档撰写者。严格按任务包约束
 - 输出必须是单个 JSON 对象，不要 Markdown 代码围栏之外的额外解释。
 """
 
+_SPEC_SYSTEM_PROMPT = """你是需求分析助手，负责把需求文档拆成原子需求。
+- 只搬运原文，不改写、不补充业务背景；
+- 每条需求必须给出 source_quote，逐字取自文档；
+- 原文没有的验收标准不要编；不明确处写入 questions。
+"""
+
 
 class ApiBackend:
     """OpenAI 兼容后端。每次 run 对应一次请求（修复循环由上层驱动）。"""
@@ -71,9 +77,7 @@ class ApiBackend:
     def run(self, packet: TaskPacket) -> BackendResult:
         started = time.monotonic()
         try:
-            kind = (
-                "ask" if (packet.workspace / "context" / "question.txt").is_file() else "generate"
-            )
+            kind = _task_kind(packet)
             request_body = _build_request(self, packet, kind)
         except OSError as exc:
             return BackendResult(
@@ -183,10 +187,20 @@ class ApiBackend:
 # ---------------------------------------------------------------- 任务包 → 请求
 
 
+def _task_kind(packet: TaskPacket) -> str:
+    if (packet.workspace / "context" / "question.txt").is_file():
+        return "ask"
+    meta = _read_meta(packet.workspace)
+    if meta.get("task_type") == "spec_extract":
+        return "spec_extract"
+    return "generate"
+
+
 def _build_request(backend: ApiBackend, packet: TaskPacket, kind: str) -> dict[str, Any]:
     task = _read(packet.task_file)
     constraints_path = packet.workspace / "constraints.md"
     constraints = _read(constraints_path) if constraints_path.is_file() else ""
+    system = _SYSTEM_PROMPT
     if kind == "ask":
         question = _read(packet.workspace / "context" / "question.txt")
         passages = _read(packet.workspace / "context" / "passages.json")
@@ -197,6 +211,24 @@ def _build_request(backend: ApiBackend, packet: TaskPacket, kind: str) -> dict[s
         )
         user = (
             f"# 问题\n{question}\n\n# 资料(passages.json)\n{passages}\n\n# 输出 JSON 结构\n{schema}"
+        )
+    elif kind == "spec_extract":
+        system = _SPEC_SYSTEM_PROMPT
+        document = _read(packet.workspace / "context" / "document.md")
+        sections = _read(packet.workspace / "context" / "sections.json")
+        schema = (
+            '{"requirements": [{"kind": "functional|non_functional", "text": "...", '
+            '"priority": "must|should|may", "source_section": "...", "source_quote": "...", '
+            '"acceptance": ["..."]}], "questions": [{"question": "...", "impact": "...", '
+            '"owner": "..."}]}'
+        )
+        user = "\n\n".join(
+            [
+                f"# 任务\n{task}",
+                f"# 需求文档（已规范化）\n{document}",
+                f"# 章节骨架（sections.json）\n{sections}",
+                f"# 输出 JSON 结构（严格遵守）\n{schema}",
+            ]
         )
     else:
         context_parts = []
@@ -221,7 +253,7 @@ def _build_request(backend: ApiBackend, packet: TaskPacket, kind: str) -> dict[s
     return {
         "model": backend._model,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         "temperature": backend._temperature,
@@ -297,6 +329,23 @@ def _usage_of(payload: dict[str, Any]) -> dict[str, int]:
 def _write_outputs(
     packet: TaskPacket, kind: str, data: dict[str, Any], model_name: str
 ) -> list[str]:
+    if kind == "spec_extract":
+        requirements = data.get("requirements")
+        questions = data.get("questions", [])
+        if not isinstance(requirements, list) or not isinstance(questions, list):
+            raise ValueError("spec_extract 输出缺少 requirements 或 questions 数组")
+        packet.output_dir.mkdir(parents=True, exist_ok=True)
+        (packet.output_dir / "extract.json").write_text(
+            json.dumps(
+                {"requirements": requirements, "questions": questions},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return ["output/extract.json"]
+
     if kind == "ask":
         answer = data.get("answer_markdown")
         result = data.get("result")

@@ -264,6 +264,11 @@ def _strip_front_matter(text: str) -> str:
     return text[end + 1 :].lstrip("\n").removeprefix("---").lstrip("\n")
 
 
+def split_long_text(text: str) -> list[str]:
+    """超长文本按行折分，块间保留重叠（10.3.1）。供 doc 切块复用。"""
+    return _split_long(text)
+
+
 def _split_long(text: str) -> list[str]:
     """超长块按行折分，块间保留重叠（10.3.1）。"""
     if len(text) <= _MAX_CHUNK_CHARS:
@@ -293,4 +298,4 @@ def _chunk_id(*parts: object) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]  # noqa: S324
 
 
-__all__ = ["ChunkBuilder"]
+__all__ = ["ChunkBuilder", "split_long_text"]
