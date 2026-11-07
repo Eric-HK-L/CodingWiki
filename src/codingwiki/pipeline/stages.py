@@ -301,7 +301,7 @@ def stage_publish(ctx: JobContext) -> str:
         "tests": len(facts.tests),
         "config_facts": len(facts.config_facts),
     }
-    index = store.publish(facts.snapshot_id, workdir=workdir, site_profile=profile)
+    index = store.publish(facts.snapshot_id, workdir=workdir, site_profile=profile, facts=facts)
     counts = index.status_counts
     return (
         f"version={index.version_id} pages={len(index.pages)} verified={counts.get('verified', 0)}"

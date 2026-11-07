@@ -16,6 +16,7 @@ import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from codingwiki.domain.models import ChangeSet
 from codingwiki.domain.wiki import (
@@ -27,6 +28,9 @@ from codingwiki.domain.wiki import (
     VersionPageEntry,
 )
 from codingwiki.errors import InputError
+
+if TYPE_CHECKING:
+    from codingwiki.domain.facts import RepoFacts
 
 _INTERNAL_LINK = re.compile(
     r"\[[^\]]*\]\(((?:module|interface|flow|config|build|test|overview|home|architecture|glossary|howto|adr|file)/[^)\s]+)\)"
@@ -111,8 +115,13 @@ class FilesystemPageStore:
         *,
         workdir: Path | None = None,
         site_profile: Mapping[str, object] | None = None,
+        facts: RepoFacts | None = None,
     ) -> VersionIndex:
-        """发布草稿区。传 workdir 时同时生成离线站点，站点成功后才切 current。"""
+        """发布草稿区。传 workdir 时同时生成离线站点，站点成功后才切 current。
+
+        传 facts 时额外生成覆盖率看板页 dashboard.html（架构 v0.10 §19）；
+        facts 缺失时站点不含看板（存量调用路径不受影响）。
+        """
         page_ids = self.list_drafts()
         if not page_ids:
             raise InputError(f"仓库 {self._repo_id} 草稿区为空，没有可发布的页面")
@@ -185,12 +194,18 @@ class FilesystemPageStore:
         if workdir is not None:
             from codingwiki.publish.site import build_site
 
+            dashboard = None
+            if facts is not None:
+                from codingwiki.publish.dashboard import build_dashboard
+
+                dashboard = build_dashboard(self._repo_id, facts, index, deps_map)
             build_site(
                 version_dir,
                 index,
                 payload,
                 workdir,
                 site_profile or {},
+                dashboard=dashboard,
             )
 
         (self._root / "current").write_text(version_id, encoding="utf-8")
