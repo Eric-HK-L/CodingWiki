@@ -70,6 +70,7 @@ class RepoConfig(_DomainModel):
     branch: str = "main"
     root: str = ""  # 可选：仓库内子目录作为分析根
     revision: Literal["latest"] | str = "latest"
+    enabled: bool = True  # false 时 `run --repo all` 跳过该仓库（计划 5172）
     workdir: str = ""  # 空表示用默认值（.codingwiki/repos/<repo_id>/work）
     excludes: list[str] = Field(default_factory=list)
     max_text_file_size_kb: int = Field(default=2048, ge=1, le=512 * 1024)

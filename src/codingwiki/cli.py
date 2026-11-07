@@ -8,31 +8,36 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from codingwiki.backends.protocol import ModelBackend
     from codingwiki.domain.eval import EvalReport, QuestionResult
+    from codingwiki.domain.job import JobRecord
     from codingwiki.retrieval import HybridSearcher
 
 from codingwiki import __version__
 from codingwiki.config import load_config, load_repo_config
 from codingwiki.config.models import AppConfig, EmbeddingSettings
 from codingwiki.domain.facts import RepoFacts
-from codingwiki.domain.models import RepoConfig, Snapshot
+from codingwiki.domain.job import StageName, StageStatus
 from codingwiki.errors import (
     CodingWikiError,
-    EnvironmentIssue,
     ExitCode,
     InputError,
-    InternalError,
 )
 from codingwiki.facts import FilesystemFactExtractor, FilesystemFactStore
 from codingwiki.logging_setup import configure_logging, get_logger
+from codingwiki.pipeline.stages import (
+    assert_workdir_revision,
+    facts_workdir,
+    load_facts_or_raise,
+    resolve_snapshot,
+    resolve_wiki_backend,
+    wiki_workdir,
+)
 from codingwiki.providers import create_provider
 from codingwiki.snapshot import FilesystemSnapshotStore
 
@@ -202,6 +207,37 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument("--no-rerank", action="store_true", help="关闭 cross-encoder 重排")
     eval_parser.set_defaults(handler=_cmd_eval)
 
+    run_parser = subcommands.add_parser(
+        "run", help="日更回流闭环：sync→facts→wiki→verify→publish→index（S10，供 cron 调用）"
+    )
+    run_parser.add_argument("--repo", required=True, help="仓库 ID，或 all 表示全部仓库")
+    run_parser.add_argument("--revision", default="", help="覆盖仓库配置的 revision")
+    run_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    run_parser.add_argument(
+        "--backend",
+        choices=["mock", "api"],
+        default="mock",
+        help="wiki 生成后端：mock=CI 地板；api=OpenAI 兼容真实模型",
+    )
+    run_parser.add_argument(
+        "--app-config", default="configs/default.yaml", help="主配置路径（wiki/index 的模型来源）"
+    )
+    run_parser.add_argument(
+        "--from",
+        dest="from_stage",
+        choices=[s.value for s in StageName],
+        default="",
+        help="从指定阶段开始（更早的阶段不执行不记录）",
+    )
+    run_parser.add_argument(
+        "--skip",
+        choices=[s.value for s in StageName],
+        action="append",
+        default=[],
+        help="跳过指定阶段（可重复）",
+    )
+    run_parser.set_defaults(handler=_cmd_run)
+
     return parser
 
 
@@ -281,9 +317,9 @@ def _cmd_facts_extract(args: argparse.Namespace) -> int:
     repo = load_repo_config(repo_path)
 
     snapshots = FilesystemSnapshotStore()
-    snapshot = _resolve_snapshot(snapshots, repo.repo_id, args.revision, args.snapshot)
-    workdir = _facts_workdir(repo, args.workdir)
-    _assert_workdir_revision(workdir, snapshot.revision)
+    snapshot = resolve_snapshot(snapshots, repo.repo_id, args.revision, args.snapshot)
+    workdir = facts_workdir(repo, args.workdir)
+    assert_workdir_revision(workdir, snapshot.revision)
 
     store = FilesystemFactStore()
     logger.info("开始提取事实 snapshot=%s workdir=%s", snapshot.snapshot_id, workdir)
@@ -331,56 +367,6 @@ def _cmd_facts_query(args: argparse.Namespace) -> int:
     return int(ExitCode.OK)
 
 
-def _resolve_snapshot(
-    store: FilesystemSnapshotStore, repo_id: str, revision: str, snapshot_id: str
-) -> Snapshot:
-    if snapshot_id:
-        return store.snapshot(snapshot_id)
-    if revision:
-        try:
-            return store.snapshot(f"{repo_id}@{revision}")
-        except InternalError as exc:
-            raise InputError(f"快照 {repo_id}@{revision} 不存在: {exc}") from exc
-    latest = store.latest(repo_id)
-    if latest is None:
-        raise InputError(
-            f"仓库 {repo_id} 还没有快照，请先执行: codingwiki repo sync --repo {repo_id}"
-        )
-    return latest
-
-
-def _facts_workdir(repo: RepoConfig, override: str) -> Path:
-    if override:
-        return Path(override).resolve()
-    base = Path(os.environ.get("CODINGWIKI_HOME", ".codingwiki")).resolve()
-    workdir = (
-        Path(repo.workdir).resolve() if repo.workdir else base / "repos" / repo.repo_id / "work"
-    )
-    return (workdir / repo.root).resolve() if repo.root else workdir
-
-
-def _assert_workdir_revision(workdir: Path, revision: str) -> None:
-    """workdir 必须是快照对应的版本，否则事实会张冠李戴。"""
-    if not (workdir / ".git").exists():
-        return
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(workdir),
-            check=False,
-            capture_output=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return
-    current = result.stdout.decode("utf-8", errors="replace").strip()
-    if result.returncode == 0 and current and current != revision:
-        raise InputError(
-            f"工作树当前版本 {current} 与快照 {revision} 不一致；"
-            f"请先执行 codingwiki repo sync --repo <id> --revision {revision}"
-        )
-
-
 def _fmt_rate(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.1%}"
 
@@ -388,26 +374,11 @@ def _fmt_rate(value: float | None) -> str:
 # ---------------------------------------------------------------- wiki 命令
 
 
-def _load_facts_or_raise(repo_id: str) -> RepoFacts:
-    facts = FilesystemFactStore().latest(repo_id)
-    if facts is None:
-        raise InputError(
-            f"没有 {repo_id} 的事实记录，请先执行: codingwiki facts extract --repo {repo_id}"
-        )
-    return facts
-
-
-def _wiki_workdir(repo_id: str, config_dir: str, override: str) -> Path:
-    repo_path = os.path.join(config_dir, f"{repo_id}.yaml")
-    repo = load_repo_config(repo_path)
-    return _facts_workdir(repo, override)
-
-
 def _cmd_wiki_plan(args: argparse.Namespace) -> int:
     from codingwiki.generate import CoveragePlanner
     from codingwiki.publish import FilesystemPageStore
 
-    facts = _load_facts_or_raise(args.repo)
+    facts = load_facts_or_raise(args.repo)
     store = FilesystemPageStore(args.repo)
     plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps())
 
@@ -431,71 +402,16 @@ def _cmd_wiki_plan(args: argparse.Namespace) -> int:
     return int(ExitCode.OK)
 
 
-def _resolve_wiki_backend(
-    args: argparse.Namespace,
-) -> tuple[ModelBackend, str, str]:
-    """按 --backend 构造后端；API 缺配置时报可操作错误，绝不静默退回 mock。"""
-    if args.backend == "mock":
-        from codingwiki.backends import MockBackend
-        from codingwiki.backends.mock import BACKEND_NAME, MODEL_NAME
-
-        return MockBackend(), BACKEND_NAME, MODEL_NAME
-
-    from codingwiki.backends import ApiBackend
-
-    config = load_config(args.app_config)
-    api = config.model.api
-    problems: list[str] = []
-    if not api.enabled:
-        problems.append("model.api.enabled 为 false")
-    if not api.base_url.strip():
-        problems.append("model.api.base_url 为空")
-    if not api.model.strip():
-        problems.append("model.api.model 为空")
-    if problems:
-        raise InputError(
-            "无法启动 API 后端：\n"
-            + "\n".join(f"- {p}" for p in problems)
-            + "\n修法：复制 configs/default.yaml 到已 gitignore 的 configs/api.local.yaml，"
-            "填写 model.api.base_url/model/api_key_file，然后用 "
-            "--backend api --app-config configs/api.local.yaml"
-        )
-
-    if api.api_key_file:
-        key_path = Path(api.api_key_file).expanduser()
-        if not key_path.is_file():
-            raise EnvironmentIssue(
-                f"API 密钥文件不存在: {key_path}；"
-                "请检查 model.api.api_key_file（只写路径，不读内容）"
-            )
-    elif not os.environ.get(api.api_key_env, "").strip():
-        raise EnvironmentIssue(
-            f"未找到 API 密钥：请配置 model.api.api_key_file，或设置环境变量 {api.api_key_env}"
-        )
-
-    backend = ApiBackend(
-        base_url=api.base_url,
-        model=api.model,
-        api_key_file=api.api_key_file,
-        api_key_env=api.api_key_env,
-        timeout_s=api.timeout_s,
-        max_retries=api.max_retries,
-        temperature=api.temperature,
-        max_tokens=api.max_tokens,
-    )
-    return backend, "api", api.model
-
-
 def _cmd_wiki_generate(args: argparse.Namespace) -> int:
     logger = get_logger("cli.wiki_generate")
     from codingwiki.generate import CoveragePlanner, GeneratePipeline, TaskPackageBuilder
     from codingwiki.publish import FilesystemPageStore
     from codingwiki.verify import PageVerifier
 
-    facts = _load_facts_or_raise(args.repo)
-    workdir = _wiki_workdir(args.repo, args.config_dir, args.workdir)
+    facts = load_facts_or_raise(args.repo)
+    workdir = wiki_workdir(args.repo, args.config_dir, args.workdir)
     store = FilesystemPageStore(args.repo)
-    backend, backend_name, model_name = _resolve_wiki_backend(args)
+    backend, backend_name, model_name = resolve_wiki_backend(args.backend, args.app_config)
     plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps())
 
     known_pages = {t.page_id for t in plan.tasks} | set(store.list_drafts())
@@ -531,8 +447,8 @@ def _cmd_wiki_verify(args: argparse.Namespace) -> int:
     from codingwiki.publish import FilesystemPageStore
     from codingwiki.verify import PageVerifier
 
-    facts = _load_facts_or_raise(args.repo)
-    workdir = _wiki_workdir(args.repo, args.config_dir, args.workdir)
+    facts = load_facts_or_raise(args.repo)
+    workdir = wiki_workdir(args.repo, args.config_dir, args.workdir)
     store = FilesystemPageStore(args.repo)
     page_ids = store.list_drafts()
     if not page_ids:
@@ -561,8 +477,8 @@ def _cmd_wiki_verify(args: argparse.Namespace) -> int:
 def _cmd_wiki_publish(args: argparse.Namespace) -> int:
     from codingwiki.publish import FilesystemPageStore
 
-    facts = _load_facts_or_raise(args.repo)
-    workdir = _wiki_workdir(args.repo, args.config_dir, "")
+    facts = load_facts_or_raise(args.repo)
+    workdir = wiki_workdir(args.repo, args.config_dir, "")
     store = FilesystemPageStore(args.repo)
     profile: dict[str, object] = {
         "files": len(facts.files),
@@ -680,8 +596,8 @@ def _cmd_index_build(args: argparse.Namespace) -> int:
     from codingwiki.retrieval import Bm25Index, ChunkBuilder, FilesystemIndexStore
     from codingwiki.retrieval.registry import create_embedder
 
-    facts = _load_facts_or_raise(args.repo)
-    workdir = _wiki_workdir(args.repo, args.config_dir, args.workdir)
+    facts = load_facts_or_raise(args.repo)
+    workdir = wiki_workdir(args.repo, args.config_dir, args.workdir)
     wiki_pages = FilesystemPageStore(args.repo).load_published_pages()
 
     chunks = ChunkBuilder(workdir).build(facts, wiki_pages)
@@ -798,7 +714,7 @@ def _cmd_eval(args: argparse.Namespace) -> int:
             f"金标准集 {golden.set_id} 属于仓库 {golden.repo_id}，与 --repo {args.repo} 不一致"
         )
 
-    facts = _load_facts_or_raise(args.repo)
+    facts = load_facts_or_raise(args.repo)
     searcher = _load_searcher(args.repo, app_config=args.app_config, no_rerank=args.no_rerank)
     _meta, chunks, _vectors = FilesystemIndexStore(args.repo).load()
     store = FilesystemPageStore(args.repo)
@@ -873,6 +789,67 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     print(_top1_distribution(report))
     print(f"报告: {path}")
     return int(ExitCode.OK)
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    from codingwiki.pipeline import JobRunner
+
+    runner = JobRunner()
+    skip = tuple(args.skip)
+    repo_ids = _enabled_repo_ids(args.config_dir) if args.repo == "all" else [args.repo]
+
+    failed: list[str] = []
+    first_error_exit = int(ExitCode.OK)
+    for repo_id in repo_ids:
+        record, exit_code = runner.run(
+            repo_id,
+            config_dir=args.config_dir,
+            revision=args.revision,
+            backend=args.backend,
+            app_config=args.app_config,
+            from_stage=args.from_stage,
+            skip=skip,
+        )
+        _print_job_record(record)
+        if record.status is not StageStatus.OK:
+            failed.append(repo_id)
+            if first_error_exit == int(ExitCode.OK):
+                first_error_exit = exit_code
+    if failed:
+        print("失败仓库: " + ", ".join(failed))
+        return first_error_exit
+    return int(ExitCode.OK)
+
+
+def _enabled_repo_ids(config_dir: str) -> list[str]:
+    """configs/repos/ 下全部 enabled 的仓库（计划 5172：未配置的跳过）。"""
+    repo_dir = Path(config_dir)
+    if not repo_dir.is_dir():
+        raise InputError(f"仓库配置目录不存在: {config_dir}")
+    ids: list[str] = []
+    for path in sorted(repo_dir.glob("*.yaml")):
+        repo = load_repo_config(path)
+        if not repo.enabled:
+            get_logger("cli.run").info("仓库 %s enabled=false，跳过", repo.repo_id)
+            continue
+        ids.append(repo.repo_id)
+    if not ids:
+        raise InputError(f"{config_dir} 下没有启用的仓库配置")
+    return ids
+
+
+def _print_job_record(record: JobRecord) -> None:
+    print(
+        f"任务 repo={record.repo_id} job={record.job_id} "
+        f"status={record.status.value} snapshot={record.snapshot_id or '-'}"
+    )
+    for stage in record.stages:
+        line = f"  {stage.status.value:7} {stage.stage.value:8} {stage.duration_s:7.1f}s"
+        if stage.summary:
+            line += f"  {stage.summary}"
+        print(line)
+    base = Path(os.environ.get("CODINGWIKI_HOME", ".codingwiki")).resolve()
+    print(f"记录: {base / 'jobs' / record.repo_id}")
 
 
 def _top1_distribution(report: EvalReport) -> str:
