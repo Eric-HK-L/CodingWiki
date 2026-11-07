@@ -118,6 +118,7 @@ _TASK_INSTRUCTIONS = """# 任务：为需求文档草拟开发 Spec
 1. 任务最多 3 个文件、最多 300 行，单一目标；文件来自 evidence 的 impact.files。
 2. 追溯矩阵每条需求恰好一行；`code_location` 必须是证据中的 path:line、symbol_id 或 wiki:page_id。
 3. 方案设计至少 2 个候选；确属唯一方案时填写 `unique_justification`。
+   `choice` 必须逐字复制某个候选的 `name`（含编号前缀与说明文字），不得简写。
 4. 没有内容写「不适用」并给出原因，不得删章。
 5. 只写 `output/draft.json`，不要输出系统编号（T-/D- 由系统生成）。
 

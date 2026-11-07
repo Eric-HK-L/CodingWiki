@@ -27,14 +27,23 @@ from codingwiki.spec.ingest import (
     save_extraction,
 )
 from codingwiki.spec.pipeline import SpecOutcome, generate_spec
+from codingwiki.spec.review import (
+    ReviewGateError,
+    apply_review,
+    load_review_log,
+    review_spec,
+    save_review_log,
+)
 from codingwiki.spec.template import render_decisions_markdown, render_spec_markdown
 from codingwiki.spec.validator import evidence_locators, validate_spec
 
 __all__ = [
     "PROMPT_VERSION",
+    "ReviewGateError",
     "SpecOutcome",
     "WikiPageProvider",
     "WikiPageRef",
+    "apply_review",
     "build_doc_chunks",
     "build_impact",
     "caller_ref",
@@ -46,6 +55,7 @@ __all__ = [
     "generate_spec",
     "load_doc_chunks",
     "load_extractions",
+    "load_review_log",
     "locate_quote",
     "make_doc_id",
     "normalize_markdown",
@@ -53,8 +63,10 @@ __all__ = [
     "read_document",
     "render_decisions_markdown",
     "render_spec_markdown",
+    "review_spec",
     "save_evidence",
     "save_extraction",
+    "save_review_log",
     "validate_bundle",
     "validate_spec",
 ]

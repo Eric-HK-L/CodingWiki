@@ -328,6 +328,40 @@ def build_parser() -> argparse.ArgumentParser:
     spec_validate_parser.add_argument("--json", action="store_true", help="输出机读 JSON 报告")
     spec_validate_parser.set_defaults(handler=_cmd_spec_validate)
 
+    spec_review_parser = spec_subcommands.add_parser(
+        "review", help="评审已校验 Spec（approve/reject，S16）"
+    )
+    spec_review_parser.add_argument("spec", help="Spec 目录或 spec.json 路径")
+    decision_group = spec_review_parser.add_mutually_exclusive_group(required=True)
+    decision_group.add_argument("--approve", action="store_true", help="评审通过")
+    decision_group.add_argument("--reject", action="store_true", help="评审退回")
+    spec_review_parser.add_argument(
+        "--role",
+        required=True,
+        choices=["requester", "module_owner", "test_owner", "security", "architect"],
+        help="评审角色：需求提出人/模块负责人/测试负责人/安全合规/架构师",
+    )
+    spec_review_parser.add_argument("--comment", default="", help="评审意见；reject 时必填")
+    spec_review_parser.add_argument(
+        "--ack-warnings",
+        action="store_true",
+        help="确认已逐条复核 warning（有 warning 时批准必填，写入评审记录）",
+    )
+    spec_review_parser.add_argument(
+        "--close-question",
+        action="append",
+        default=[],
+        metavar="Q-ID",
+        help="关闭指定开放问题（可重复）；关闭全部后才能批准",
+    )
+    spec_review_parser.add_argument(
+        "--evidence", default="", help="证据包路径；默认取 Spec 同目录 evidence.json"
+    )
+    spec_review_parser.add_argument(
+        "--extract", default="", help="抽取产物路径；默认从 Spec 目录或 docs/<doc_id> 查找"
+    )
+    spec_review_parser.set_defaults(handler=_cmd_spec_review)
+
     return parser
 
 
@@ -1000,6 +1034,53 @@ def _cmd_spec_validate(args: argparse.Namespace) -> int:
             f"info={len(report.info)}"
         )
     return 3 if report.blockers else int(ExitCode.OK)
+
+
+_REVIEW_ROLE_LABELS = {
+    "requester": "需求提出人",
+    "module_owner": "模块负责人",
+    "test_owner": "测试负责人",
+    "security": "安全/合规",
+    "architect": "架构师",
+}
+
+
+def _cmd_spec_review(args: argparse.Namespace) -> int:
+    from codingwiki.domain.spec import ReviewDecision, ReviewRole
+    from codingwiki.spec import apply_review, validate_spec
+
+    spec_path = Path(args.spec).expanduser()
+    if spec_path.is_dir():
+        spec_path = spec_path / "spec.json"
+    if not spec_path.is_file():
+        raise InputError(f"Spec 文件不存在: {spec_path}")
+
+    spec, evidence = _load_validation_inputs(spec_path, args.evidence)
+    extraction = _load_extraction(spec, evidence, args.extract)
+    report = validate_spec(spec, extraction, evidence)
+
+    decision = ReviewDecision.APPROVE if args.approve else ReviewDecision.REJECT
+    updated, log = apply_review(
+        spec,
+        report,
+        spec_path.parent,
+        role=ReviewRole(args.role),
+        decision=decision,
+        comment=args.comment,
+        close_questions=args.close_question,
+        ack_warnings=args.ack_warnings,
+        snapshot_id=evidence.snapshot_id,
+    )
+    latest = log.latest
+    print(
+        f"评审: role={_REVIEW_ROLE_LABELS[args.role]}, decision={latest.decision.value}, "
+        f"status={updated.status.value}, blockers={latest.blockers}, warnings={latest.warnings}, "
+        f"warnings_acknowledged={latest.warnings_acknowledged}"
+    )
+    if args.close_question:
+        print(f"已关闭开放问题: {', '.join(args.close_question)}")
+    print(f"评审记录: {spec_path.parent / 'review.json'}")
+    return int(ExitCode.OK)
 
 
 def _app_config_or_default(path: str) -> AppConfig:
