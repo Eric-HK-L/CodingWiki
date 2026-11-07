@@ -41,6 +41,14 @@ _SPEC_SYSTEM_PROMPT = """你是需求分析助手，负责把需求文档拆成�
 - 原文没有的验收标准不要编；不明确处写入 questions。
 """
 
+_SPEC_DRAFT_SYSTEM_PROMPT = """你是技术方案设计者，负责为已编号的需求草拟开发 Spec。
+- 需求、编号、证据全部来自任务包，不得新增、改写或遗漏需求；
+- 11 章编号与标题固定，没有内容也写「不适用」并给出原因，不得删章；
+- 任务最多 3 个文件、最多 300 行，文件只能取 evidence 的 impact.files；
+- 追溯矩阵每条需求恰好一行，code_location 必须来自证据的 path:line / symbol_id / wiki:page_id；
+- 只输出单个 JSON 对象，不输出 T-/D- 编号（由系统生成）。
+"""
+
 
 class ApiBackend:
     """OpenAI 兼容后端。每次 run 对应一次请求（修复循环由上层驱动）。"""
@@ -193,6 +201,8 @@ def _task_kind(packet: TaskPacket) -> str:
     meta = _read_meta(packet.workspace)
     if meta.get("task_type") == "spec_extract":
         return "spec_extract"
+    if meta.get("task_type") == "spec_draft":
+        return "spec_draft"
     return "generate"
 
 
@@ -230,6 +240,33 @@ def _build_request(backend: ApiBackend, packet: TaskPacket, kind: str) -> dict[s
                 f"# 输出 JSON 结构（严格遵守）\n{schema}",
             ]
         )
+    elif kind == "spec_draft":
+        system = _SPEC_DRAFT_SYSTEM_PROMPT
+        document = _read(packet.workspace / "context" / "document.md")
+        extract = _read(packet.workspace / "context" / "extract.json")
+        evidence = _read(packet.workspace / "context" / "evidence.json")
+        errors_path = packet.workspace / "errors.json"
+        errors = _read(errors_path) if errors_path.is_file() else ""
+        schema = (
+            '{"sections": [{"number": 1, "title": "背景与目标", "body": "..."}], '
+            '"tasks": [{"goal": "...", "files": ["a.cpp"], "estimated_lines": 120, '
+            '"acceptance": ["..."], "depends_on_indexes": []}], '
+            '"trace": [{"requirement_id": "R-001", "design_section": "5 方案设计", '
+            '"code_location": "src/a.cpp:12", "test": "test_a", "task_index": 1}], '
+            '"decisions": [{"title": "...", "context": "...", '
+            '"candidates": [{"name": "方案A", "summary": "...", "pros": "...", "cons": "..."}], '
+            '"choice": "方案A", "rationale": "...", "unique_justification": ""}]}'
+        )
+        parts = [
+            f"# 任务\n{task}",
+            f"# 需求文档（已规范化）\n{document}",
+            f"# 已编号需求与开放问题（extract.json）\n{extract}",
+            f"# 证据包与影响面（evidence.json）\n{evidence}",
+        ]
+        if errors:
+            parts.append(f"# 上一轮校验失败原因（errors.json，必须逐条修正）\n{errors}")
+        parts.append(f"# 输出 JSON 结构（严格遵守）\n{schema}")
+        user = "\n\n".join(parts)
     else:
         context_parts = []
         for path in sorted((packet.workspace / "context").glob("*.json")):
@@ -345,6 +382,19 @@ def _write_outputs(
             encoding="utf-8",
         )
         return ["output/extract.json"]
+
+    if kind == "spec_draft":
+        draft: dict[str, Any] = {}
+        for key in ("sections", "tasks", "trace", "decisions"):
+            value = data.get(key, [])
+            if not isinstance(value, list):
+                raise ValueError(f"spec_draft 输出的 {key} 必须是数组")
+            draft[key] = value
+        packet.output_dir.mkdir(parents=True, exist_ok=True)
+        (packet.output_dir / "draft.json").write_text(
+            json.dumps(draft, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        return ["output/draft.json"]
 
     if kind == "ask":
         answer = data.get("answer_markdown")

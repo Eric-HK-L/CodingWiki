@@ -263,6 +263,40 @@ class EvidenceBundle(_WikiModel):
         return self
 
 
+class CandidateOption(_WikiModel):
+    """方案设计中的一个候选。"""
+
+    name: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    pros: str = ""
+    cons: str = ""
+
+
+class DecisionRecord(_WikiModel):
+    """一条方案决策（ADR）。至少 2 个候选；唯一方案需写明依据。"""
+
+    id: str = Field(pattern=r"^D-\d{3}$")
+    title: str = Field(min_length=1)
+    context: str = Field(min_length=1)
+    candidates: list[CandidateOption] = Field(default_factory=list)
+    choice: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    unique_justification: str = ""
+
+    @model_validator(mode="after")
+    def _candidates_valid(self) -> DecisionRecord:
+        names = [candidate.name for candidate in self.candidates]
+        if len(names) != len(set(names)):
+            raise ValueError(f"决策 {self.id} 的候选名重复")
+        if len(self.candidates) < 2 and not self.unique_justification:
+            raise ValueError(
+                f"决策 {self.id} 至少需要 2 个候选；唯一方案必须填写 unique_justification"
+            )
+        if names and self.choice not in names:
+            raise ValueError(f"决策 {self.id} 的选择 {self.choice!r} 不在候选列表中")
+        return self
+
+
 class SpecDocument(_WikiModel):
     """一份完整 Spec。元信息由系统写入，不采信模型输出。"""
 
@@ -276,6 +310,7 @@ class SpecDocument(_WikiModel):
     questions: list[OpenQuestion] = Field(default_factory=list)
     tasks: list[DesignTask] = Field(default_factory=list)
     trace: list[TraceRow] = Field(default_factory=list)
+    decisions: list[DecisionRecord] = Field(default_factory=list)
     validation: ValidationReport | None = None
 
     @model_validator(mode="after")
@@ -302,8 +337,9 @@ class SpecDocument(_WikiModel):
         ids = [r.id for r in self.requirements]
         ids += [q.id for q in self.questions]
         ids += [t.id for t in self.tasks]
+        ids += [d.id for d in self.decisions]
         if len(ids) != len(set(ids)):
-            raise ValueError("Spec 内需求/问题/任务编号存在重复")
+            raise ValueError("Spec 内需求/问题/任务/决策编号存在重复")
 
 
 class ExtractionResult(_WikiModel):
@@ -330,6 +366,8 @@ class ExtractionResult(_WikiModel):
 
 __all__ = [
     "AcceptanceCriterion",
+    "CandidateOption",
+    "DecisionRecord",
     "DesignTask",
     "DocSection",
     "EvidenceBundle",

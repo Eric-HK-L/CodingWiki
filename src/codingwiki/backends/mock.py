@@ -38,6 +38,8 @@ FAIL_MISSING_TITLE = "missing_title"  # front matter 缺 title
 FAIL_FUZZY_WORD = "fuzzy_word"  # 正文混入无依据模糊词
 FAIL_BAD_JSON = "bad_json"  # result.json 写成非法 JSON
 FAIL_BAD_CITATION = "bad_citation"  # ask：引用不存在的 S 编号
+FAIL_SPEC_MISSING_SECTION = "spec_missing_section"  # spec_draft：缺第 11 章
+FAIL_SPEC_BAD_TASK = "spec_bad_task"  # spec_draft：任务超过 3 个文件
 
 
 class MockBackend:
@@ -50,6 +52,8 @@ class MockBackend:
         started = time.monotonic()
         if _is_spec_extract(packet.workspace):
             return self._run_spec_extract(packet, started)
+        if _is_spec_draft(packet.workspace):
+            return self._run_spec_draft(packet, started)
         if (packet.workspace / "context" / "question.txt").is_file():
             return self._run_ask(packet, started)
         try:
@@ -140,6 +144,42 @@ class MockBackend:
             status=BackendStatus.SUCCEEDED,
             exit_code=0,
             output_files=["output/extract.json"],
+            duration_ms=_elapsed_ms(started),
+            tokens_in=_rough_tokens(packet.workspace),
+            tokens_out=_rough_tokens(packet.output_dir),
+            model=MODEL_NAME,
+        )
+
+    # ---------------------------------------------------------------- Spec 草拟
+
+    def _run_spec_draft(self, packet: TaskPacket, started: float) -> BackendResult:
+        """模板化草拟 11 章：章节/任务/追溯全部由证据与抽取产物组装。"""
+        try:
+            extract = json.loads(
+                (packet.workspace / "context" / "extract.json").read_text(encoding="utf-8")
+            )
+            evidence = json.loads(
+                (packet.workspace / "context" / "evidence.json").read_text(encoding="utf-8")
+            )
+            meta = json.loads((packet.workspace / "meta.json").read_text(encoding="utf-8"))
+            attempt = int(meta.get("attempt") or 1)
+            payload = _spec_draft(extract, evidence, failure=self._failures.get(attempt))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return BackendResult(
+                status=BackendStatus.FAILED,
+                duration_ms=_elapsed_ms(started),
+                model=MODEL_NAME,
+                error=f"Spec 草拟任务包不可读: {exc}",
+            )
+
+        packet.output_dir.mkdir(parents=True, exist_ok=True)
+        (packet.output_dir / "draft.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        return BackendResult(
+            status=BackendStatus.SUCCEEDED,
+            exit_code=0,
+            output_files=["output/draft.json"],
             duration_ms=_elapsed_ms(started),
             tokens_in=_rough_tokens(packet.workspace),
             tokens_out=_rough_tokens(packet.output_dir),
@@ -797,6 +837,215 @@ def _is_spec_extract(workspace: Path) -> bool:
     return isinstance(data, dict) and data.get("task_type") == SPEC_EXTRACT_TASK
 
 
+SPEC_DRAFT_TASK = "spec_draft"
+_DRAFT_SECTIONS = [
+    "背景与目标",
+    "术语",
+    "现状",
+    "需求",
+    "方案设计",
+    "影响分析",
+    "测试计划",
+    "编码任务拆分",
+    "风险与回滚",
+    "开放问题与假设",
+    "追溯矩阵",
+]
+
+
+def _is_spec_draft(workspace: Path) -> bool:
+    meta = workspace / "meta.json"
+    if not meta.is_file():
+        return False
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("task_type") == SPEC_DRAFT_TASK
+
+
+def _draft_locator(item: dict[str, Any]) -> str:
+    path = str(item.get("path") or "")
+    if path:
+        line = int(item.get("line") or 0)
+        return f"{path}:{line}" if line else path
+    symbol = str(item.get("symbol_id") or "")
+    if symbol:
+        return symbol
+    page = str(item.get("page_id") or "")
+    return f"wiki:{page}" if page else ""
+
+
+def _spec_draft(
+    extract: dict[str, Any], evidence: dict[str, Any], failure: str | None
+) -> dict[str, Any]:
+    """确定性草稿：章节与任务全部来自 extract/evidence，不新增内容。"""
+    requirements = [item for item in extract.get("requirements", []) if isinstance(item, dict)]
+    questions = [item for item in extract.get("questions", []) if isinstance(item, dict)]
+    evidence_rows = {
+        str(row.get("requirement_id")): row
+        for row in evidence.get("requirements", [])
+        if isinstance(row, dict)
+    }
+    title = str(extract.get("title") or "需求文档")
+    snapshot = str(evidence.get("snapshot_id") or "")
+
+    tasks: list[dict[str, Any]] = []
+    trace: list[dict[str, Any]] = []
+    for index, requirement in enumerate(requirements, start=1):
+        requirement_id = str(requirement.get("id") or f"R-{index:03d}")
+        row = evidence_rows.get(requirement_id, {})
+        raw_impact = row.get("impact")
+        impact: dict[str, Any] = raw_impact if isinstance(raw_impact, dict) else {}
+        items = [item for item in row.get("items", []) if isinstance(item, dict)]
+        files = [str(path) for path in impact.get("files", []) if path][:3]
+        if not files:
+            files = sorted({str(item.get("path")) for item in items if item.get("path")})[:3]
+        acceptance = [
+            str(ac.get("text"))
+            for ac in requirement.get("acceptance", [])
+            if isinstance(ac, dict) and ac.get("text")
+        ] or [f"满足 {requirement_id} 的可观察结果"]
+        tasks.append(
+            {
+                "goal": f"实现 {requirement_id}：{requirement.get('text', '')}",
+                "files": files,
+                "estimated_lines": 120,
+                "acceptance": acceptance,
+                "depends_on_indexes": [],
+            }
+        )
+        locator = next((_draft_locator(item) for item in items if _draft_locator(item)), "")
+        tests = [str(name) for name in impact.get("tests", []) if name]
+        trace.append(
+            {
+                "requirement_id": requirement_id,
+                "design_section": "5 方案设计",
+                "code_location": locator,
+                "test": tests[0] if tests else "待补充回归测试（现有快照未找到对应测试）",
+                "task_index": index,
+            }
+        )
+
+    decision: dict[str, Any] = {
+        "title": "实现路径选择",
+        "context": f"{title} 共 {len(requirements)} 条需求，证据绑定快照 {snapshot}。",
+        "candidates": [
+            {
+                "name": "方案A",
+                "summary": "在现有模块内扩展，复用已有接口与配置读取。",
+                "pros": "改动面最小，与现有调用方兼容。",
+                "cons": "模块职责继续变重。",
+            },
+            {
+                "name": "方案B",
+                "summary": "新增独立模块，通过窄接口接入现有流程。",
+                "pros": "职责清晰，便于独立测试。",
+                "cons": "新增构建目标与集成成本。",
+            },
+        ],
+        "choice": "方案A",
+        "rationale": "证据集中在现有模块，扩展方案的回归范围更小。",
+        "unique_justification": "",
+    }
+
+    status_line = f"{title}。共 {len(requirements)} 条需求，绑定快照 `{snapshot}`。"
+    symbols = sorted(
+        {
+            str(item.get("symbol_id"))
+            for row in evidence_rows.values()
+            for item in row.get("items", [])
+            if isinstance(item, dict) and item.get("symbol_id")
+        }
+    )
+    current_lines: list[str] = []
+    for requirement in requirements:
+        row = evidence_rows.get(str(requirement.get("id")), {})
+        for item in [i for i in row.get("items", []) if isinstance(i, dict)][:3]:
+            locator = _draft_locator(item)
+            if locator:
+                current_lines.append(f"- {requirement.get('id')}：`{locator}`")
+    requirement_lines = []
+    for requirement in requirements:
+        acceptance = [
+            str(ac.get("text"))
+            for ac in requirement.get("acceptance", [])
+            if isinstance(ac, dict) and ac.get("text")
+        ]
+        line = (
+            f"- {requirement.get('id')}（{requirement.get('priority')}，"
+            f"{requirement.get('kind')}）：{requirement.get('text')}"
+        )
+        if acceptance:
+            line += "；验收：" + "；".join(acceptance)
+        requirement_lines.append(line)
+    impact_lines = []
+    for requirement in requirements:
+        impact = evidence_rows.get(str(requirement.get("id")), {}).get("impact") or {}
+        interfaces = len(impact.get("interfaces", []))
+        callers = len(impact.get("callers", []))
+        impact_lines.append(
+            f"- {requirement.get('id')}：文件 {', '.join(impact.get('files', [])[:3]) or '无'}；"
+            f"接口 {interfaces} 个；调用方 {callers} 个"
+        )
+    test_lines = []
+    no_test = "不适用：现有快照未找到对应测试，需新增回归测试"
+    for requirement in requirements:
+        impact = evidence_rows.get(str(requirement.get("id")), {}).get("impact") or {}
+        tests = [str(name) for name in impact.get("tests", []) if name]
+        test_lines.append(f"- {requirement.get('id')}：{', '.join(tests[:5]) or no_test}")
+    task_lines = [
+        f"- T-{index:03d}：{task['goal']}（{len(task['files'])} 文件，"
+        f"{task['estimated_lines']} 行）"
+        for index, task in enumerate(tasks, start=1)
+    ]
+    trace_lines = ["| 需求 | 设计章节 | 代码位置 | 测试 | 任务 |", "|---|---|---|---|---|"]
+    trace_lines += [
+        f"| {row['requirement_id']} | {row['design_section']} | `{row['code_location']}` | "
+        f"{row['test']} | T-{row['task_index']:03d} |"
+        for row in trace
+    ]
+    question_lines = [
+        f"- Q：{question.get('question')}（影响：{question.get('impact') or '待评估'}）"
+        for question in questions
+        if question.get("question")
+    ] or ["无。"]
+    bodies = [
+        status_line,
+        "本文涉及符号：" + ("、".join(symbols[:8]) if symbols else "不适用：证据中没有符号。"),
+        "\n".join(current_lines) or "不适用：证据中没有可定位的代码位置。",
+        "\n".join(requirement_lines) or "不适用：抽取产物没有需求。",
+        "候选方案：\n"
+        + "\n".join(
+            f"- {candidate['name']}：{candidate['summary']}" for candidate in decision["candidates"]
+        )
+        + f"\n\n选择 **{decision['choice']}**：{decision['rationale']}",
+        "\n".join(impact_lines) or "不适用：没有影响面数据。",
+        "\n".join(test_lines) or "不适用：没有测试证据。",
+        "\n".join(task_lines) or "不适用：没有可拆分的编码任务。",
+        "风险：改动限定在影响面列出的文件；回滚方式为按任务反向撤销提交。"
+        "若涉及配置默认值，需在发布说明中标注。",
+        "\n".join(question_lines),
+        "\n".join(trace_lines),
+    ]
+    sections = [
+        {"number": number, "title": title_text, "body": body}
+        for number, (title_text, body) in enumerate(
+            zip(_DRAFT_SECTIONS, bodies, strict=True), start=1
+        )
+    ]
+    if failure == FAIL_SPEC_MISSING_SECTION:
+        sections = sections[:-1]
+    if failure == FAIL_SPEC_BAD_TASK and tasks:
+        tasks[0]["files"] = ["a.cpp", "b.cpp", "c.cpp", "d.cpp"]
+    return {
+        "sections": sections,
+        "tasks": tasks,
+        "trace": trace,
+        "decisions": [decision],
+    }
+
+
 def _spec_extract(
     document: str, sections: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -883,7 +1132,10 @@ __all__ = [
     "FAIL_BAD_JSON",
     "FAIL_FUZZY_WORD",
     "FAIL_MISSING_TITLE",
+    "FAIL_SPEC_BAD_TASK",
+    "FAIL_SPEC_MISSING_SECTION",
     "MODEL_NAME",
     "MockBackend",
+    "SPEC_DRAFT_TASK",
     "SPEC_EXTRACT_TASK",
 ]
