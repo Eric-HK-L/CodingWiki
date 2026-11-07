@@ -410,7 +410,7 @@ def generate_spec(
     )
     detail = "；".join(issue.message for issue in previous_errors[:3]) or "无详情"
     raise InputError(
-        f"Spec 草拟 {rounds} 轮仍未通过结构校验：{detail}；已保留草稿与错误清单: {directory}"
+        f"Spec 草拟 {rounds} 轮仍未通过自动校验：{detail}；已保留草稿与错误清单: {directory}"
     )
 
 
