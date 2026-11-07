@@ -110,6 +110,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--repo", required=True, help="仓库 ID")
     generate_parser.add_argument("--max-tasks", type=int, default=0, help="任务预算；0 表示不限")
     generate_parser.add_argument("--max-rounds", type=int, default=3, help="单页最大修复轮数")
+    generate_parser.add_argument(
+        "--workers", type=int, default=1, help="并发生成页数（真实模型可提速，默认 1）"
+    )
     generate_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
     generate_parser.add_argument("--workdir", default="", help="覆盖工作树路径")
     generate_parser.add_argument(
@@ -538,6 +541,12 @@ def _cmd_wiki_generate(args: argparse.Namespace) -> int:
     backend, backend_name, model_name = resolve_wiki_backend(args.backend, args.app_config)
     plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps())
 
+    # S17 §15.5：全量计划时清理不在计划内的旧页（接口页按目录聚合后 ID 会迁移）
+    if args.max_tasks == 0:
+        removed = store.prune_drafts({t.page_id for t in plan.tasks})
+        if removed:
+            logger.info("清理旧草稿页 %d 个: %s", len(removed), ", ".join(removed[:10]))
+
     known_pages = {t.page_id for t in plan.tasks} | set(store.list_drafts())
     pipeline = GeneratePipeline(
         backend=backend,
@@ -547,6 +556,7 @@ def _cmd_wiki_generate(args: argparse.Namespace) -> int:
         max_rounds=args.max_rounds,
         backend_name=backend_name,
         model_name=model_name,
+        max_workers=args.workers,
     )
     outcomes = pipeline.run_plan(plan, facts)
 

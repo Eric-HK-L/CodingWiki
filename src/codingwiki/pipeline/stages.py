@@ -235,6 +235,8 @@ def stage_wiki(ctx: JobContext) -> str:
     store = FilesystemPageStore(ctx.repo.repo_id)
     backend, backend_name, model_name = resolve_wiki_backend(ctx.backend, ctx.app_config)
     plan = CoveragePlanner().plan(facts, store.load_deps())
+    # S17 §15.5：run 的 wiki 阶段总是全量计划，清理不在计划内的旧页
+    store.prune_drafts({t.page_id for t in plan.tasks})
 
     known_pages = {t.page_id for t in plan.tasks} | set(store.list_drafts())
     pipeline = GeneratePipeline(

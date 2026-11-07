@@ -22,7 +22,6 @@ from codingwiki.domain.wiki import (
     PageType,
 )
 from codingwiki.generate.modules import (
-    call_degrees,
     is_header,
     is_public_symbol,
     module_groups,
@@ -30,8 +29,10 @@ from codingwiki.generate.modules import (
 
 _MODULE_STANDALONE = 44
 _MODULE_ROLLUP_LIMIT = 15
-_INTERFACE_LIMIT = 24
-_FLOW_LIMIT = 12
+_INTERFACE_LIMIT = 100  # S17：目录聚合，硬上限（cuphy 实际约 43 页）
+_INTERFACE_MIN = 10  # 覆盖面已达标时仍保留的多样性下限
+_INTERFACE_COVERAGE = 0.95  # C2 目标：公开符号累计覆盖
+_FLOW_LIMIT = 120  # S17：入口按目录去重后全量（cuphy 93 个入口目录）
 _FLOW_HOPS = 3
 
 
@@ -179,42 +180,60 @@ class CoveragePlanner:
     # ---------------------------------------------------------------- 接口页
 
     def _interface_tasks(self, facts: RepoFacts) -> list[PageTask]:
-        degrees = call_degrees(facts)
-        candidates: list[tuple[int, str]] = []
+        """按目录聚合公开符号；累计覆盖 ≥95% 的目录优先成页（S17 §15.2）。
+
+        单文件一页无法在页面预算内达到 C2 ≥95%（cuphy 需 338 页），
+        目录聚合后 43 页即可覆盖 95% 的公开符号。
+        """
+        dir_public: Counter[str] = Counter()
+        dir_header: dict[str, bool] = {}
+        seen: set[str] = set()
         for file in facts.files:
+            if file.path in seen:  # 事实层可能存在同路径重复条目，覆盖统计按唯一文件
+                continue
+            seen.add(file.path)
             public = [symbol for symbol in file.symbols if is_public_symbol(symbol)]
             if not public:
                 continue
-            incoming = sum(degrees.get(symbol.symbol_id, 0) for symbol in public)
-            score = len(public) + incoming * 2 + (50 if is_header(file.path) else 0)
-            candidates.append((score, file.path))
+            directory = _parent_dir(file.path)
+            dir_public[directory] += len(public)
+            dir_header[directory] = dir_header.get(directory, False) or is_header(file.path)
 
-        candidates.sort(key=lambda item: (-item[0], item[1]))
-        chosen = [item for item in candidates if is_header(item[1])][:_INTERFACE_LIMIT]
-        if len(chosen) < 10:
-            seen = {path for _score, path in chosen}
-            for item in candidates:
-                if item[1] not in seen:
-                    chosen.append(item)
-                if len(chosen) >= _INTERFACE_LIMIT:
-                    break
+        if not dir_public:
+            return []
 
-        stems = [path.rsplit(".", 1)[0] for _score, path in chosen]
-        stem_counts = Counter(stems)
+        total_public = sum(dir_public.values())
+        target = int(total_public * _INTERFACE_COVERAGE + 0.999999)  # ceil，避免浮点截断
+        ranked = sorted(
+            dir_public,
+            key=lambda directory: (
+                -dir_public[directory],
+                -int(dir_header[directory]),
+                directory,
+            ),
+        )
+
+        chosen: list[str] = []
+        covered = 0
+        for directory in ranked:
+            if len(chosen) >= _INTERFACE_LIMIT:
+                break
+            if covered >= target and len(chosen) >= _INTERFACE_MIN:
+                break
+            chosen.append(directory)
+            covered += dir_public[directory]
+
         tasks: list[PageTask] = []
-        for index, (_score, path) in enumerate(chosen):
-            stem = stems[index]
-            # 同名 .h/.hpp/.cuh 会撞 ID；撞了就保留扩展名，保证一页一文件
-            if stem_counts[stem] > 1:
-                stem = path
+        for index, directory in enumerate(chosen):
+            page_id = f"interface/{directory if directory != '.' else 'root'}"
             tasks.append(
                 PageTask(
-                    task_id=_task_id(f"interface/{stem}"),
-                    page_id=f"interface/{stem}",
+                    task_id=_task_id(page_id),
+                    page_id=page_id,
                     page_type=PageType.INTERFACE,
-                    title_hint=f"接口 {path}",
-                    subject=path,
-                    scope=path,
+                    title_hint=f"接口 {directory}",
+                    subject=directory,
+                    scope=directory,
                     coverage_level=CoverageLevel.C2,
                     priority=200 + index,
                 )
@@ -329,8 +348,12 @@ class CoveragePlanner:
             if deps is None:
                 marked.append(task)
                 continue
-            unchanged = bool(deps.files) and all(
-                blob_by_path.get(path) == sha for path, sha in deps.files.items()
+            # S17 §15.3：复用还要求旧 deps 已登记当前作用域，否则无法补上 C1 覆盖
+            expected = set(scope_files(task, facts))
+            unchanged = (
+                bool(deps.files)
+                and expected <= set(deps.files)
+                and all(blob_by_path.get(path) == sha for path, sha in deps.files.items())
             )
             if unchanged:
                 marked.append(task.model_copy(update={"reuse": True}))
@@ -357,6 +380,34 @@ def _rollup_categories(leftovers: list[str]) -> list[str]:
 
 def _category(module: str) -> str:
     return module.split("/", 1)[0] if "/" in module else module
+
+
+def _parent_dir(path: str) -> str:
+    return path.rsplit("/", 1)[0] if "/" in path else "."
+
+
+def scope_files(task: PageTask, facts: RepoFacts) -> list[str]:
+    """聚合页作用域内的文件（S17 §15.3），用于依赖登记与增量复用判定。"""
+    if task.page_type is PageType.MODULE:
+        groups = module_groups(facts)
+        if task.rollup:
+            excluded = set(task.exclude)
+            return [
+                file.path
+                for module, files in groups.items()
+                if module.startswith(task.scope) and module not in excluded
+                for file in files
+            ]
+        return [file.path for file in groups.get(task.scope, [])]
+    if task.page_type is PageType.INTERFACE:
+        files = [file for file in facts.files if _parent_dir(file.path) == task.scope]
+        if not files:
+            files = [file for file in facts.files if file.path == task.scope]
+        return [file.path for file in files]
+    if task.page_type is PageType.FLOW:
+        entry_path = task.subject.partition("::")[0]
+        return [entry_path] if facts.blob_by_path.get(entry_path) else []
+    return []
 
 
 def _entry_candidates(facts: RepoFacts) -> list[EntryFact]:
