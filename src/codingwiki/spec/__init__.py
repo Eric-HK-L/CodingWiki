@@ -26,9 +26,13 @@ from codingwiki.spec.ingest import (
     read_document,
     save_extraction,
 )
+from codingwiki.spec.pipeline import SpecOutcome, generate_spec
+from codingwiki.spec.template import render_decisions_markdown, render_spec_markdown
+from codingwiki.spec.validator import evidence_locators, validate_spec
 
 __all__ = [
     "PROMPT_VERSION",
+    "SpecOutcome",
     "WikiPageProvider",
     "WikiPageRef",
     "build_doc_chunks",
@@ -36,8 +40,10 @@ __all__ = [
     "caller_ref",
     "collect_evidence",
     "doc_sha256",
+    "evidence_locators",
     "extract_requirements",
     "find_quote_line",
+    "generate_spec",
     "load_doc_chunks",
     "load_extractions",
     "locate_quote",
@@ -45,7 +51,10 @@ __all__ = [
     "normalize_markdown",
     "parse_sections",
     "read_document",
+    "render_decisions_markdown",
+    "render_spec_markdown",
     "save_evidence",
     "save_extraction",
     "validate_bundle",
+    "validate_spec",
 ]

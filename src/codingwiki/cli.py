@@ -287,6 +287,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     spec_evidence_parser.set_defaults(handler=_cmd_spec_evidence)
 
+    spec_generate_parser = spec_subcommands.add_parser(
+        "generate", help="需求文档 → 完整 Spec（草拟 + 校验 + 修复循环，S14）"
+    )
+    spec_generate_parser.add_argument("--repo", required=True, help="仓库 ID")
+    spec_generate_parser.add_argument("--doc", required=True, help="需求文档 Markdown 路径")
+    spec_generate_parser.add_argument(
+        "--id", dest="spec_id", required=True, help="Spec 编号（F-001 形式）"
+    )
+    spec_generate_parser.add_argument(
+        "--snapshot", default="", help="要求的事实快照；默认取该仓库最近一次快照"
+    )
+    spec_generate_parser.add_argument(
+        "--wiki-version", default="", help="发布页面版本；默认 current"
+    )
+    spec_generate_parser.add_argument(
+        "--backend",
+        choices=["mock", "api"],
+        default="api",
+        help="模型后端：api=真实模型；mock=离线链路测试（不用于质量指标）",
+    )
+    spec_generate_parser.add_argument(
+        "--app-config", default="configs/default.yaml", help="主配置路径（--backend api 时读取）"
+    )
+    spec_generate_parser.add_argument(
+        "--max-rounds", type=int, default=3, help="校验失败时的最大草拟轮数"
+    )
+    spec_generate_parser.set_defaults(handler=_cmd_spec_generate)
+
     return parser
 
 
@@ -828,6 +856,49 @@ def _cmd_spec_evidence(args: argparse.Namespace) -> int:
     print("影响面: " + ", ".join(f"{key}={value}" for key, value in impact.items()))
     print("悬空引用 0")
     print(f"产物: {path}")
+    return int(ExitCode.OK)
+
+
+# ---------------------------------------------------------------- S14 Spec 生成
+
+
+def _cmd_spec_generate(args: argparse.Namespace) -> int:
+    from codingwiki.facts import FilesystemFactStore
+    from codingwiki.spec import generate_spec
+
+    facts = (
+        FilesystemFactStore().load(args.repo, args.snapshot)
+        if args.snapshot
+        else load_facts_or_raise(args.repo)
+    )
+    if facts is None:
+        raise InputError(
+            f"仓库 {args.repo} 没有快照 {args.snapshot}；"
+            f"请先执行 codingwiki facts extract --repo {args.repo}"
+        )
+    backend, backend_name, model_name = resolve_wiki_backend(args.backend, args.app_config)
+    pages = _FilesystemWikiPages(args.repo, args.wiki_version).pages()
+    outcome = generate_spec(
+        repo_id=args.repo,
+        doc_path=args.doc,
+        spec_id=args.spec_id,
+        backend=backend,
+        facts=facts,
+        pages=pages,
+        max_rounds=args.max_rounds,
+        backend_name=backend_name,
+        model_name=model_name,
+    )
+    spec = outcome.spec
+    blockers = len(spec.validation.blockers) if spec.validation else 0
+    warnings = len(spec.validation.warnings) if spec.validation else 0
+    print(
+        f"Spec: id={spec.spec_id}, status={spec.status.value}, snapshot={spec.snapshot_id}, "
+        f"requirements={len(spec.requirements)}, tasks={len(spec.tasks)}, "
+        f"decisions={len(spec.decisions)}, attempts={outcome.attempts}"
+    )
+    print(f"校验: blockers={blockers}, warnings={warnings}")
+    print(f"产物: {outcome.directory}")
     return int(ExitCode.OK)
 
 
