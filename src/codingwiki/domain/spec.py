@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import Field, field_validator, model_validator
@@ -69,6 +70,23 @@ class EvidenceKind(StrEnum):
     BUILD = "build"
     TEST = "test"
     SIMILAR = "similar"
+
+
+class ReviewRole(StrEnum):
+    """评审角色（计划 13.9）。"""
+
+    REQUESTER = "requester"  # 需求提出人
+    MODULE_OWNER = "module_owner"  # 模块负责人
+    TEST_OWNER = "test_owner"  # 测试负责人
+    SECURITY = "security"  # 安全/合规
+    ARCHITECT = "architect"  # 架构师
+
+
+class ReviewDecision(StrEnum):
+    """评审结论。"""
+
+    APPROVE = "approve"
+    REJECT = "reject"
 
 
 class DocSection(_WikiModel):
@@ -218,6 +236,52 @@ class ValidationReport(_WikiModel):
         return bool(self.blockers)
 
 
+class ReviewRecord(_WikiModel):
+    """一次评审记录（架构 阶段2 §8）。approve 记录不得携带 blocker。"""
+
+    spec_id: str = Field(pattern=r"^F-\d{3}$")
+    role: ReviewRole
+    decision: ReviewDecision
+    comment: str = ""
+    created_at: datetime
+    snapshot_id: str = Field(min_length=1)
+    blockers: int = Field(default=0, ge=0)
+    warnings: int = Field(default=0, ge=0)
+    warnings_acknowledged: bool = False
+
+    @model_validator(mode="after")
+    def _decision_rules(self) -> ReviewRecord:
+        if self.decision is ReviewDecision.REJECT and not self.comment.strip():
+            raise ValueError("reject 评审必须填写意见（原因不得丢失）")
+        if self.decision is ReviewDecision.APPROVE:
+            if self.blockers:
+                raise ValueError(f"approve 评审不得携带 blocker（实际 {self.blockers}）")
+            if self.warnings and not self.warnings_acknowledged:
+                raise ValueError("存在 warning 时必须在评审记录中显式确认")
+        return self
+
+
+class ReviewLog(_WikiModel):
+    """review.json：同一 Spec 的追加式评审记录。"""
+
+    spec_id: str = Field(pattern=r"^F-\d{3}$")
+    snapshot_id: str = Field(min_length=1)
+    reviews: list[ReviewRecord] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _records_match(self) -> ReviewLog:
+        for record in self.reviews:
+            if record.spec_id != self.spec_id:
+                raise ValueError(f"评审记录 {record.role.value} 的 spec_id 与 review.json 不一致")
+            if record.snapshot_id != self.snapshot_id:
+                raise ValueError(f"评审记录 {record.role.value} 的快照与 review.json 不一致")
+        return self
+
+    @property
+    def latest(self) -> ReviewRecord:
+        return self.reviews[-1]
+
+
 class ImpactAnalysis(_WikiModel):
     """确定性影响面（架构 阶段2 §5.2）。全部为排序去重后的稳定列表。"""
 
@@ -331,6 +395,8 @@ class SpecDocument(_WikiModel):
                 raise ValueError(
                     f"仍有未关闭的开放问题，不能 approved: {', '.join(open_questions)}"
                 )
+            if self.validation is None or self.validation.blockers:
+                raise ValueError("approved 必须有 0 blocker 的校验报告")
         return self
 
     def _assert_ids_unique(self) -> None:
@@ -381,6 +447,10 @@ __all__ = [
     "RequirementEvidence",
     "RequirementKind",
     "RequirementPriority",
+    "ReviewDecision",
+    "ReviewLog",
+    "ReviewRecord",
+    "ReviewRole",
     "SPEC_SECTIONS",
     "SourceDocument",
     "SpecDocument",

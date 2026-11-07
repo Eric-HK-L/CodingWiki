@@ -240,6 +240,12 @@ def test_code_source_blocks_unsourced_claim() -> None:
     assert "code_source" in _rules(report.blockers)
 
 
+def test_code_source_ignores_cpp_qualified_names() -> None:
+    sections = _sections(current="- R-001：相关类型 `cuphy::pusch_rx` 负责启动")
+    report = validate_spec(_spec(sections=sections), _extraction(), _evidence())
+    assert "code_source" not in _rules(report.blockers)
+
+
 def test_trace_completeness_blocks_orphan_requirement_and_task() -> None:
     report = validate_spec(_spec(trace=[]), _extraction(), _evidence())
     rules = _rules(report.blockers)

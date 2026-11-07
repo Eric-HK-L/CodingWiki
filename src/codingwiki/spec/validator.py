@@ -49,6 +49,9 @@ def evidence_locators(items: list[EvidenceItem]) -> set[str]:
     for item in items:
         if item.path:
             locators.add(f"{item.path}:{item.line}" if item.line else item.path)
+            if not item.line:
+                # 文件级证据（config/build）允许用 path:0 表示，与 path 等价
+                locators.add(f"{item.path}:0")
         if item.symbol_id:
             locators.add(item.symbol_id)
         if item.page_id:
@@ -70,6 +73,9 @@ def _looks_like_locator(value: str) -> bool:
     if value.startswith(("http://", "https://")):
         return False
     if value.startswith(_ID_PREFIXES):
+        return False
+    # C++ 限定名（namespace::type）不是代码位置；符号位置必须带路径与 @行号
+    if "::" in value and "/" not in value:
         return False
     if ":" in value or "@" in value:
         return True
@@ -413,6 +419,17 @@ def validate_spec(
             SpecIssue(
                 rule="status_questions",
                 message=f"存在 {len(open_questions)} 个未关闭问题，状态应保持 needs-info",
+            )
+        )
+
+    # 14. 状态完整性：approved 必须经得起现场重算，禁止手改 spec.json 绕过评审
+    if spec.status is SpecStatus.APPROVED and blockers:
+        count = len(blockers)
+        blockers.append(
+            SpecIssue(
+                rule="status_integrity",
+                message=f"状态为 approved 但现场重算仍有 {count} 个 blocker；请回到 draft 重新评审",
+                ref=spec.spec_id,
             )
         )
 

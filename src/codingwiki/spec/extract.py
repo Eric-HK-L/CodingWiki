@@ -38,7 +38,7 @@ from codingwiki.spec.ingest import (
     write_doc_bundle,
 )
 
-PROMPT_VERSION = "spec-extract-v1"
+PROMPT_VERSION = "spec-extract-v3"
 
 
 class _RawModel(BaseModel):
@@ -202,7 +202,10 @@ _TASK_INSTRUCTIONS = """# 任务：需求抽取
 1. 一条需求只描述一个可验证行为；功能需求与非功能需求分开。
 2. 每条需求必须给出 `source_quote`：从原文逐字复制的一段话（允许空白差异），
    不得改写、不得拼接、不得编造。
-3. `acceptance` 只写原文明确给出的验收标准；原文没有就留空。
+3. 每条需求（`functional` 与 `non_functional`）必须至少给出 1 条 `acceptance`，
+   写成可观察、可判定的断言（执行什么 / 输入什么 / 期望结果）；可以从该需求本身
+   推导最小断言，但不得编造原文没有的业务规则。推导不出时写入 `questions`，
+   或将多个不可独立验证的片段合并为一条需求，不得让 acceptance 留空。
 4. 原文不明确的地方写入 `questions`，不要猜答案。
 5. 优先级：must / should / may。
 
