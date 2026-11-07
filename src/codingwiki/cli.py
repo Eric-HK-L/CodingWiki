@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from codingwiki.domain.eval import EvalReport, QuestionResult
     from codingwiki.domain.job import JobRecord
-    from codingwiki.domain.spec import Requirement
+    from codingwiki.domain.spec import EvidenceBundle, ExtractionResult, Requirement, SpecDocument
     from codingwiki.retrieval import HybridSearcher
     from codingwiki.spec.evidence import WikiPageRef
 
@@ -314,6 +314,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-rounds", type=int, default=3, help="校验失败时的最大草拟轮数"
     )
     spec_generate_parser.set_defaults(handler=_cmd_spec_generate)
+
+    spec_validate_parser = spec_subcommands.add_parser(
+        "validate", help="校验已落盘 Spec（计划 13.8 十项规则，S15）"
+    )
+    spec_validate_parser.add_argument("spec", help="Spec 目录或 spec.json 路径")
+    spec_validate_parser.add_argument(
+        "--evidence", default="", help="证据包路径；默认取 Spec 同目录 evidence.json"
+    )
+    spec_validate_parser.add_argument(
+        "--extract", default="", help="抽取产物路径；默认从 Spec 目录或 docs/<doc_id> 查找"
+    )
+    spec_validate_parser.add_argument("--json", action="store_true", help="输出机读 JSON 报告")
+    spec_validate_parser.set_defaults(handler=_cmd_spec_validate)
 
     return parser
 
@@ -900,6 +913,93 @@ def _cmd_spec_generate(args: argparse.Namespace) -> int:
     print(f"校验: blockers={blockers}, warnings={warnings}")
     print(f"产物: {outcome.directory}")
     return int(ExitCode.OK)
+
+
+def _load_validation_inputs(
+    spec_path: Path, evidence_arg: str
+) -> tuple[SpecDocument, EvidenceBundle]:
+    """读取 spec.json 与同源证据包；缺一即报可操作错误。"""
+    from codingwiki.domain.spec import EvidenceBundle, SpecDocument
+
+    try:
+        spec = SpecDocument.model_validate_json(spec_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InputError(f"Spec 不可读: {spec_path}: {exc}") from exc
+
+    evidence_path = (
+        Path(evidence_arg).expanduser() if evidence_arg else spec_path.parent / "evidence.json"
+    )
+    if not evidence_path.is_file():
+        raise InputError(f"缺少证据包 {evidence_path}；请先执行 codingwiki spec generate")
+    try:
+        evidence = EvidenceBundle.model_validate_json(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InputError(f"证据包不可读: {evidence_path}: {exc}") from exc
+    return spec, evidence
+
+
+def _load_extraction(
+    spec: SpecDocument, evidence: EvidenceBundle, extract_arg: str
+) -> ExtractionResult:
+    """抽取产物按显式路径 → Spec 工作区 → docs/<doc_id> 顺序查找，最后按 Spec 副本兜底。"""
+    from codingwiki.domain.spec import ExtractionResult
+    from codingwiki.spec.ingest import doc_bundle_dir
+
+    candidates: list[Path] = []
+    if extract_arg:
+        candidates.append(Path(extract_arg).expanduser())
+    if spec.source_doc.doc_id:
+        candidates.append(doc_bundle_dir(evidence.repo_id, spec.source_doc.doc_id) / "extract.json")
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            return ExtractionResult.model_validate_json(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise InputError(f"抽取产物不可读: {candidate}: {exc}") from exc
+
+    return ExtractionResult(
+        repo_id=evidence.repo_id,
+        doc_id=spec.source_doc.doc_id,
+        doc_sha256=spec.source_doc.doc_sha256,
+        source_path=spec.source_doc.path,
+        title=spec.title,
+        sections=[],
+        requirements=list(spec.requirements),
+        questions=list(spec.questions),
+    )
+
+
+def _cmd_spec_validate(args: argparse.Namespace) -> int:
+    from codingwiki.spec import validate_spec
+
+    spec_path = Path(args.spec).expanduser()
+    if spec_path.is_dir():
+        spec_path = spec_path / "spec.json"
+    if not spec_path.is_file():
+        raise InputError(f"Spec 文件不存在: {spec_path}")
+
+    spec, evidence = _load_validation_inputs(spec_path, args.evidence)
+    extraction = _load_extraction(spec, evidence, args.extract)
+    report = validate_spec(spec, extraction, evidence)
+
+    if args.json:
+        print(report.model_dump_json(indent=2))
+    else:
+        print(f"Spec: id={spec.spec_id}, status={spec.status.value}, snapshot={spec.snapshot_id}")
+        for level, issues in (
+            ("blocker", report.blockers),
+            ("warning", report.warnings),
+            ("info", report.info),
+        ):
+            for issue in issues:
+                ref = f" [{issue.ref}]" if issue.ref else ""
+                print(f"- {level} {issue.rule}: {issue.message}{ref}")
+        print(
+            f"校验: blockers={len(report.blockers)}, warnings={len(report.warnings)}, "
+            f"info={len(report.info)}"
+        )
+    return 3 if report.blockers else int(ExitCode.OK)
 
 
 def _app_config_or_default(path: str) -> AppConfig:

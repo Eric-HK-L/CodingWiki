@@ -190,7 +190,7 @@ def test_repair_loop_retries_after_oversized_task(tmp_path: Path) -> None:
 
 def test_repair_loop_exhausted_keeps_draft(tmp_path: Path) -> None:
     backend = MockBackend(failures=[{"attempt": 1, "kind": FAIL_SPEC_MISSING_SECTION}])
-    with pytest.raises(InputError, match="仍未通过结构校验"):
+    with pytest.raises(InputError, match="仍未通过自动校验"):
         _generate(tmp_path, backend, max_rounds=1)
     directory = specs_root(tmp_path / "home") / "demo" / "F-001"
     assert (directory / "draft-task" / "output" / "draft.json").is_file()

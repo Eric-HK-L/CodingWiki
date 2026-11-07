@@ -40,6 +40,12 @@ FAIL_BAD_JSON = "bad_json"  # result.json 写成非法 JSON
 FAIL_BAD_CITATION = "bad_citation"  # ask：引用不存在的 S 编号
 FAIL_SPEC_MISSING_SECTION = "spec_missing_section"  # spec_draft：缺第 11 章
 FAIL_SPEC_BAD_TASK = "spec_bad_task"  # spec_draft：任务超过 3 个文件
+FAIL_SPEC_ORPHAN_REQUIREMENT = "spec_orphan_requirement"  # spec_draft：删掉一条追溯行
+FAIL_SPEC_ORPHAN_TASK = "spec_orphan_task"  # spec_draft：新增未被追溯的任务
+FAIL_SPEC_DANGLING_LOCATION = "spec_dangling_location"  # spec_draft：追溯位置不在证据
+FAIL_SPEC_UNSOURCED_CLAIM = "spec_unsourced_claim"  # spec_draft：现状章出现无出处位置
+FAIL_SPEC_TERM_DRIFT = "spec_term_drift"  # spec_draft：术语大小写漂移
+FAIL_SPEC_NO_ROLLBACK = "spec_no_rollback"  # spec_draft：风险章缺回滚
 
 
 class MockBackend:
@@ -876,6 +882,20 @@ def _draft_locator(item: dict[str, Any]) -> str:
     return f"wiki:{page}" if page else ""
 
 
+def _draft_term(symbols: list[str], evidence_rows: dict[str, dict[str, Any]]) -> str:
+    """取一个强标识符用于术语漂移注入。"""
+    if symbols:
+        raw = symbols[0].split("::", 1)[1] if "::" in symbols[0] else symbols[0]
+        return raw.rsplit("@", 1)[0].split("::")[-1]
+    configs = sorted(
+        str(key)
+        for row in evidence_rows.values()
+        for key in (row.get("impact") or {}).get("config", [])
+        if key and "_" in str(key)
+    )
+    return configs[0] if configs else ""
+
+
 def _spec_draft(
     extract: dict[str, Any], evidence: dict[str, Any], failure: str | None
 ) -> dict[str, Any]:
@@ -1028,6 +1048,14 @@ def _spec_draft(
         "\n".join(question_lines),
         "\n".join(trace_lines),
     ]
+    if failure == FAIL_SPEC_UNSOURCED_CLAIM:
+        bodies[2] += "\n- 结论：`src/nowhere/dangling.cpp:999` 是入口。"
+    if failure == FAIL_SPEC_TERM_DRIFT:
+        drift = _draft_term(symbols, evidence_rows)
+        if drift:
+            bodies[1] += f"\n术语漂移示例：`{drift.upper()}`。"
+    if failure == FAIL_SPEC_NO_ROLLBACK:
+        bodies[8] = "风险：改动限定在影响面列出的文件。"
     sections = [
         {"number": number, "title": title_text, "body": body}
         for number, (title_text, body) in enumerate(
@@ -1038,6 +1066,21 @@ def _spec_draft(
         sections = sections[:-1]
     if failure == FAIL_SPEC_BAD_TASK and tasks:
         tasks[0]["files"] = ["a.cpp", "b.cpp", "c.cpp", "d.cpp"]
+    if failure == FAIL_SPEC_ORPHAN_REQUIREMENT and trace:
+        trace = trace[:-1]
+    if failure == FAIL_SPEC_ORPHAN_TASK:
+        extra_files = list(tasks[0]["files"]) if tasks else ["CMakeLists.txt"]
+        tasks.append(
+            {
+                "goal": "孤立任务：没有被任何需求引用",
+                "files": extra_files,
+                "estimated_lines": 10,
+                "acceptance": ["占位"],
+                "depends_on_indexes": [],
+            }
+        )
+    if failure == FAIL_SPEC_DANGLING_LOCATION and trace:
+        trace[0]["code_location"] = "src/nowhere/dangling.cpp:999"
     return {
         "sections": sections,
         "tasks": tasks,
@@ -1133,7 +1176,13 @@ __all__ = [
     "FAIL_FUZZY_WORD",
     "FAIL_MISSING_TITLE",
     "FAIL_SPEC_BAD_TASK",
+    "FAIL_SPEC_DANGLING_LOCATION",
     "FAIL_SPEC_MISSING_SECTION",
+    "FAIL_SPEC_NO_ROLLBACK",
+    "FAIL_SPEC_ORPHAN_REQUIREMENT",
+    "FAIL_SPEC_ORPHAN_TASK",
+    "FAIL_SPEC_TERM_DRIFT",
+    "FAIL_SPEC_UNSOURCED_CLAIM",
     "MODEL_NAME",
     "MockBackend",
     "SPEC_DRAFT_TASK",
