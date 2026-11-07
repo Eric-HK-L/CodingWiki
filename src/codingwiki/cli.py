@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from codingwiki.domain.eval import EvalReport, QuestionResult
     from codingwiki.domain.job import JobRecord
+    from codingwiki.domain.spec import Requirement
     from codingwiki.retrieval import HybridSearcher
+    from codingwiki.spec.evidence import WikiPageRef
 
 from codingwiki import __version__
 from codingwiki.config import load_config, load_repo_config
@@ -269,6 +271,21 @@ def build_parser() -> argparse.ArgumentParser:
     spec_list_parser = spec_subcommands.add_parser("list", help="列出已抽取的需求文档")
     spec_list_parser.add_argument("--repo", required=True, help="仓库 ID")
     spec_list_parser.set_defaults(handler=_cmd_spec_list)
+
+    spec_evidence_parser = spec_subcommands.add_parser(
+        "evidence", help="逐条检索并生成证据包（S13）"
+    )
+    spec_evidence_parser.add_argument("--repo", required=True, help="仓库 ID")
+    spec_evidence_parser.add_argument(
+        "--spec", required=True, help="doc_id、F-编号/Spec 目录，或 extract.json/spec.json 路径"
+    )
+    spec_evidence_parser.add_argument(
+        "--snapshot", default="", help="要求的事实快照；默认取 facts latest"
+    )
+    spec_evidence_parser.add_argument(
+        "--wiki-version", default="", help="发布页面版本；默认 current"
+    )
+    spec_evidence_parser.set_defaults(handler=_cmd_spec_evidence)
 
     return parser
 
@@ -689,6 +706,128 @@ def _cmd_spec_list(args: argparse.Namespace) -> int:
             f"{record.doc_id}\tR={functional}\tN={non_functional}\tQ={len(record.questions)}\t"
             f"backend={record.backend}/{record.model}\t{record.source_path}"
         )
+    return int(ExitCode.OK)
+
+
+class _FilesystemWikiPages:
+    """WikiPageProvider 的只读适配器：spec 不 import publish，接线留在入口层。"""
+
+    def __init__(self, repo_id: str, version: str = "") -> None:
+        self._repo_id = repo_id
+        self._version = version
+
+    def pages(self) -> list[WikiPageRef]:
+        from codingwiki.publish import FilesystemPageStore
+        from codingwiki.spec.evidence import WikiPageRef
+
+        store = FilesystemPageStore(self._repo_id)
+        pages: list[WikiPageRef] = []
+        for page_id, title, text in store.load_published_pages(self._version or None):
+            snapshot = "unknown"
+            for line in text.splitlines()[:10]:
+                if line.startswith("snapshot:"):
+                    snapshot = line.split(":", 1)[1].strip() or "unknown"
+                    break
+            pages.append(WikiPageRef(page_id=page_id, title=title, text=text, snapshot_id=snapshot))
+        return pages
+
+
+def _read_evidence_input(path: Path) -> tuple[str, str, list[Requirement], str, Path]:
+    """读 extract.json / spec.json，返回 (doc_id, title, requirements, spec_id, 输出目录)。"""
+    from codingwiki.domain.spec import ExtractionResult, SpecDocument
+
+    try:
+        if path.name == "spec.json":
+            spec = SpecDocument.model_validate_json(path.read_text(encoding="utf-8"))
+            return (
+                spec.source_doc.doc_id,
+                spec.title,
+                list(spec.requirements),
+                spec.spec_id,
+                path.parent,
+            )
+        if path.name == "extract.json":
+            extract = ExtractionResult.model_validate_json(path.read_text(encoding="utf-8"))
+            return (
+                extract.doc_id,
+                extract.title,
+                list(extract.requirements),
+                "",
+                path.parent,
+            )
+    except (OSError, ValueError) as exc:
+        raise InputError(f"证据输入不可读: {path}: {exc}") from exc
+    raise InputError(f"不支持的证据输入 {path}；应为 extract.json 或 spec.json")
+
+
+def _resolve_evidence_input(
+    repo_id: str, spec_arg: str
+) -> tuple[str, str, list[Requirement], str, Path]:
+    """按 doc_id / F-编号 / 路径定位抽取产物；找不到时报可操作错误。"""
+    from codingwiki.spec.ingest import doc_bundle_dir, specs_root
+
+    candidate = Path(spec_arg).expanduser()
+    if candidate.exists():
+        if candidate.is_dir():
+            for name in ("spec.json", "extract.json"):
+                target = candidate / name
+                if target.is_file():
+                    return _read_evidence_input(target)
+            raise InputError(f"目录 {candidate} 下没有 spec.json 或 extract.json")
+        return _read_evidence_input(candidate)
+
+    extract = doc_bundle_dir(repo_id, spec_arg) / "extract.json"
+    if extract.is_file():
+        return _read_evidence_input(extract)
+    spec = specs_root() / repo_id / spec_arg / "spec.json"
+    if spec.is_file():
+        return _read_evidence_input(spec)
+    raise InputError(
+        f"找不到证据输入 {spec_arg}；请先执行 codingwiki spec extract --repo {repo_id} --doc <md>"
+    )
+
+
+def _cmd_spec_evidence(args: argparse.Namespace) -> int:
+    from codingwiki.spec.evidence import collect_evidence, save_evidence
+
+    facts = load_facts_or_raise(args.repo)
+    doc_id, title, requirements, spec_id, out_dir = _resolve_evidence_input(args.repo, args.spec)
+    pages = _FilesystemWikiPages(args.repo, args.wiki_version).pages()
+    bundle = collect_evidence(
+        repo_id=args.repo,
+        doc_id=doc_id,
+        doc_title=title,
+        requirements=requirements,
+        facts=facts,
+        pages=pages,
+        spec_id=spec_id,
+        snapshot_id=args.snapshot,
+    )
+    path = save_evidence(bundle, out_dir)
+
+    counts: dict[str, int] = {}
+    for requirement in bundle.requirements:
+        for item in requirement.items:
+            counts[item.kind.value] = counts.get(item.kind.value, 0) + 1
+    kinds = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+    impact = {
+        "files": 0,
+        "interfaces": 0,
+        "callers": 0,
+        "config": 0,
+        "build": 0,
+        "tests": 0,
+    }
+    for requirement in bundle.requirements:
+        for key in impact:
+            impact[key] += len(getattr(requirement.impact, key))
+    print(
+        f"证据包: doc_id={doc_id}, snapshot={bundle.snapshot_id}, "
+        f"requirements={len(bundle.requirements)}, items={sum(counts.values())}（{kinds}）"
+    )
+    print("影响面: " + ", ".join(f"{key}={value}" for key, value in impact.items()))
+    print("悬空引用 0")
+    print(f"产物: {path}")
     return int(ExitCode.OK)
 
 
