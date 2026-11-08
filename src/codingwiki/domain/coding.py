@@ -79,6 +79,23 @@ class StageStatus(StrEnum):
     ERROR = "error"
 
 
+class TestFailureKind(StrEnum):
+    """JUnit 用例结局；error 是测试框架报错，failure 是断言失败。"""
+
+    FAILURE = "failure"
+    ERROR = "error"
+
+
+class TestFailure(_WikiModel):
+    """一条 JUnit 用例级失败（14.5.4）；id 为 classname::name。"""
+
+    id: str = Field(min_length=1)
+    kind: TestFailureKind = TestFailureKind.FAILURE
+    file: str = ""
+    line: int = Field(default=0, ge=0)
+    message: str = ""
+
+
 class StageReport(_WikiModel):
     """一次构建/测试/lint 命令的结果（stage 级，不含原始全量日志）。"""
 
@@ -90,6 +107,15 @@ class StageReport(_WikiModel):
     stdout_tail: str = ""
     stderr_tail: str = ""
     artifacts: list[str] = Field(default_factory=list)
+    report_files: list[str] = Field(default_factory=list)
+    test_failures: list[TestFailure] = Field(default_factory=list)
+    test_skipped: list[str] = Field(default_factory=list)
+    report_error: str = ""
+
+    @property
+    def tests_parsed(self) -> bool:
+        """报告存在且解析成功才算可比较；坏 XML 退回退出码/日志。"""
+        return bool(self.report_files) and not self.report_error
 
 
 class FailureItem(_WikiModel):
@@ -343,6 +369,10 @@ class RunMetrics(_WikiModel):
     tokens_out: int = Field(default=0, ge=0)
     baseline_failures: int = Field(default=0, ge=0)
     final_failures: int = Field(default=0, ge=0)
+    tests_parsed: bool = False
+    new_failures: int = Field(default=0, ge=0)
+    pre_existing_failures: int = Field(default=0, ge=0)
+    skipped_tests: int = Field(default=0, ge=0)
     guard_rejected: bool = False
     verifier_rejected: bool = False
     regression: bool = False
@@ -442,6 +472,8 @@ __all__ = [
     "StageReport",
     "StageStatus",
     "TaskPacket",
+    "TestFailure",
+    "TestFailureKind",
     "VerifierIssue",
     "VerifierReport",
     "VerifierSource",

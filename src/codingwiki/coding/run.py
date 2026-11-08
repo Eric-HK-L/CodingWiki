@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from codingwiki.coding.backend import run_backend
 from codingwiki.coding.commands import stage_specs
 from codingwiki.coding.errors import parse_failures, timeout_failure
 from codingwiki.coding.escalate import build_escalation, render_escalation
+from codingwiki.coding.junit import JUnitConfig, load_config, parse_reports
 from codingwiki.coding.metrics import run_report
 from codingwiki.coding.packet import build_packet
 from codingwiki.coding.verify import verify_patch
@@ -54,6 +56,7 @@ from codingwiki.patch.check import check_workspace
 from codingwiki.patch.protocol import WorktreeGit
 
 _ERROR_LIMIT = 20
+_TEST_STAGES = frozenset({StageKind.TEST_FAST, StageKind.TEST_FULL})
 
 
 def load_approved_spec(spec_dir: str | Path) -> SpecDocument:
@@ -108,6 +111,7 @@ def run_task(
     policy = PatchPolicy(allowed_paths=task.files_allowed)
     source_root = workspace / record.root if record.root else workspace
     pairs = stage_specs(repo, workspace_root=source_root)
+    junit = load_config(repo.commands.test, source_root=source_root)
     for kind, stage_spec in pairs:
         assert_command_allowed(stage_spec.argv, source=f"阶段 {kind.value}")
     assert_command_allowed(config.command, source="编码后端")
@@ -119,10 +123,9 @@ def run_task(
     sink = AuditSink(audit_path)
     runner = AuditRunner(runner or LocalCommandRunner(), sink)
 
-    baseline = run_stages(pairs, runner)
-    if any(item.status is not StageStatus.OK for item in baseline):
-        failed = next(item for item in baseline if item.status is not StageStatus.OK)
-        baseline_errors = _errors_of(baseline)
+    baseline = run_stages(pairs, runner, junit=junit)
+    baseline_errors = _errors_of(baseline)
+    if baseline_errors:
         _write_models(run_dir / "baseline" / "stages.json", baseline)
         _write_models(run_dir / "baseline" / "errors.json", baseline_errors)
         run = _build_run(
@@ -137,7 +140,7 @@ def run_task(
             rounds=0,
             max_rounds=max_rounds,
             baseline=baseline,
-            message=f"基线未通过：{failed.kind.value}（exit {failed.exit_code}），拒绝交给模型",
+            message=_baseline_message(baseline),
             now=now,
             audit_path=str(audit_path),
         )
@@ -195,12 +198,13 @@ def run_task(
             stop_message = _guard_message(guard.findings)
             round_message = stop_message
         else:
-            stages = run_stages(pairs, runner)
+            stages = run_stages(pairs, runner, junit=junit)
             _write_models(round_dir / "stages.json", stages)
             failed_stage = next(
                 (item for item in stages if item.status is not StageStatus.OK), None
             )
-            if failed_stage is None:
+            skipped = sum(len(item.test_skipped) for item in stages)
+            if failed_stage is None and not skipped:
                 if verifier is not None:
                     verify_dir = round_dir / "verify"
                     round_verifier = verify_patch(
@@ -235,9 +239,13 @@ def run_task(
                 round_errors = _errors_of(stages)
                 errors = round_errors
                 _write_models(round_dir / "errors.json", errors)
-                round_message = (
-                    f"第 {index} 轮未通过：{failed_stage.kind.value}（{len(round_errors)} 项失败）"
-                )
+                if failed_stage is None:
+                    round_message = f"第 {index} 轮未通过：{skipped} 项测试被跳过（跳过不算通过）"
+                else:
+                    round_message = (
+                        f"第 {index} 轮未通过：{failed_stage.kind.value}"
+                        f"（{len(round_errors)} 项失败）"
+                    )
                 keys = {item.key for item in errors}
                 if previous_keys is not None and keys == previous_keys:
                     stop = CodingStopReason.NO_PROGRESS
@@ -366,11 +374,18 @@ def _finish_run(
 
 
 def run_stages(
-    pairs: list[tuple[StageKind, CommandSpec]], runner: CommandRunner
+    pairs: list[tuple[StageKind, CommandSpec]],
+    runner: CommandRunner,
+    *,
+    junit: JUnitConfig | None = None,
 ) -> list[StageReport]:
-    """顺序执行；首个失败即停（编译失败就不跑测试）。"""
+    """顺序执行；首个失败即停（编译失败就不跑测试）。
+
+    测试阶段执行完按配置解析 JUnit 报告；只接受本轮新生成的报告文件。
+    """
     reports: list[StageReport] = []
     for kind, spec in pairs:
+        started_ns = time.time_ns()
         result = runner.run(spec)
         report = StageReport(
             kind=kind,
@@ -382,6 +397,16 @@ def run_stages(
             stderr_tail=result.stderr[-4000:],
             artifacts=result.artifacts,
         )
+        if junit is not None and kind in _TEST_STAGES:
+            parsed = parse_reports(junit, since_ns=started_ns)
+            report = report.model_copy(
+                update={
+                    "report_files": parsed.files,
+                    "test_failures": parsed.failures,
+                    "test_skipped": parsed.skipped,
+                    "report_error": "; ".join(parsed.errors),
+                }
+            )
         reports.append(report)
         if report.status is not StageStatus.OK:
             break
@@ -399,10 +424,49 @@ def _errors_of(stages: list[StageReport]) -> list[FailureItem]:
         remaining = _ERROR_LIMIT - len(items)
         if remaining <= 0:
             break
+        if stage.test_failures:
+            items.extend(_test_failures(stage)[:remaining])
+            continue
         items.extend(
             parse_failures(stage.kind, stage.stdout_tail, stage.stderr_tail, limit=remaining)
         )
+    for stage in stages:
+        if len(items) >= _ERROR_LIMIT:
+            break
+        items.extend(_skipped_failures(stage)[: _ERROR_LIMIT - len(items)])
     return items[:_ERROR_LIMIT]
+
+
+def _test_failures(stage: StageReport) -> list[FailureItem]:
+    return [
+        FailureItem(
+            stage=stage.kind,
+            code=f"test:{item.id}",
+            file=item.file,
+            line=item.line,
+            message=item.message or item.id,
+        )
+        for item in stage.test_failures
+    ]
+
+
+def _skipped_failures(stage: StageReport) -> list[FailureItem]:
+    return [
+        FailureItem(stage=stage.kind, code="test.skipped", message=f"测试被跳过：{ident}")
+        for ident in stage.test_skipped
+    ]
+
+
+def _baseline_message(baseline: list[StageReport]) -> str:
+    failed = next((item for item in baseline if item.status is not StageStatus.OK), None)
+    if failed is None:
+        skipped = sum(len(item.test_skipped) for item in baseline)
+        return f"基线未通过：{skipped} 项测试被跳过（跳过不算通过），拒绝交给模型"
+    message = f"基线未通过：{failed.kind.value}（exit {failed.exit_code}）"
+    pre_existing = len({item.id for item in failed.test_failures})
+    if pre_existing:
+        message += f"；其中 {pre_existing} 项为原有失败（不算本任务引入）"
+    return f"{message}，拒绝交给模型"
 
 
 def _stage_summary(stages: list[StageReport]) -> str:

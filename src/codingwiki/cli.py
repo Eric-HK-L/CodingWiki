@@ -1434,7 +1434,15 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
         print(f"阶段: {' '.join(_stage_line(item) for item in run.stages)}")
     if run.message:
         print(f"说明: {run.message}")
-    print(f"指标: {render_metrics(metrics_of(run))}")
+    metrics = metrics_of(run)
+    print(f"指标: {render_metrics(metrics)}")
+    if metrics.tests_parsed:
+        print(
+            f"测试: 新增失败={metrics.new_failures} 原有失败={metrics.pre_existing_failures} "
+            f"跳过={metrics.skipped_tests}"
+        )
+    for failure in [entry for entry in run.errors if entry.code.startswith("test:")][:5]:
+        print(f"失败测试: {failure.code[len('test:') :]} {failure.message[:120]}")
     if run.escalation_path:
         escalation = EscalationReport.model_validate_json(
             Path(run.escalation_path).read_text(encoding="utf-8")

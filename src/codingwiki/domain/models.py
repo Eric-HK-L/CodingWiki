@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -37,11 +38,29 @@ class BuildCommands(_DomainModel):
 
 
 class TestCommands(_DomainModel):
-    """测试命令（14.7.1）。fast 是快速通道，full 是回归全量。"""
+    """测试命令（14.7.1）。fast 是快速通道，full 是回归全量。
+
+    report_format/report_paths 声明测试报告位置（14.5.4）；路径是相对源码根的 glob，
+    只允许仓库内相对路径，避免读取仓库外文件。
+    """
 
     fast: str = ""
     full: str = ""
     timeout_s: int = Field(default=3600, ge=1, le=86_400)
+    report_format: Literal["", "junit"] = ""
+    report_paths: list[str] = Field(default_factory=list)
+
+    @field_validator("report_paths")
+    @classmethod
+    def _report_paths_relative(cls, value: list[str]) -> list[str]:
+        for item in value:
+            text = item.strip()
+            if not text:
+                raise ValueError("report_paths 不能包含空路径")
+            path = Path(text)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"report_paths 只允许仓库内相对路径：{text}")
+        return value
 
 
 class LintCommands(_DomainModel):
