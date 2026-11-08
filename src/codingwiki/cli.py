@@ -472,6 +472,14 @@ def build_parser() -> argparse.ArgumentParser:
     coding_replay_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
     coding_replay_parser.set_defaults(handler=_cmd_coding_replay)
 
+    coding_report_parser = coding_subcommands.add_parser(
+        "report", help="汇总运行指标：成功率、一次通过率、轮次、耗时与词元（S25）"
+    )
+    coding_report_parser.add_argument("--repo", required=True, help="仓库 ID")
+    coding_report_parser.add_argument("--spec-dir", required=True, help="approved Spec 目录")
+    coding_report_parser.add_argument("--task", default="", help="只统计指定任务；空表示全部")
+    coding_report_parser.set_defaults(handler=_cmd_coding_report)
+
     return parser
 
 
@@ -1371,6 +1379,7 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
 
     from codingwiki.coding import load_approved_spec, load_backend_config, run_task
     from codingwiki.coding.audit import audit_count
+    from codingwiki.coding.metrics import metrics_of, render_metrics
     from codingwiki.domain.coding import CodingRunStatus, EscalationReport
     from codingwiki.patch import WorkspaceManager
     from codingwiki.patch.protocol import WorktreeGit
@@ -1425,6 +1434,7 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
         print(f"阶段: {' '.join(_stage_line(item) for item in run.stages)}")
     if run.message:
         print(f"说明: {run.message}")
+    print(f"指标: {render_metrics(metrics_of(run))}")
     if run.escalation_path:
         escalation = EscalationReport.model_validate_json(
             Path(run.escalation_path).read_text(encoding="utf-8")
@@ -1480,6 +1490,25 @@ def _cmd_coding_replay(args: argparse.Namespace) -> int:
     return (
         int(ExitCode.OK) if report.status is ReplayStatus.REPRODUCED else int(ExitCode.ENVIRONMENT)
     )
+
+
+def _cmd_coding_report(args: argparse.Namespace) -> int:
+    from codingwiki.coding import load_approved_spec
+    from codingwiki.coding.metrics import aggregate, load_reports, render_metrics, render_stats
+    from codingwiki.patch import WorkspaceManager
+
+    spec = load_approved_spec(args.spec_dir)
+    if args.task:
+        _coded_task(spec, args.task)
+    reports = load_reports(WorkspaceManager().home, args.repo, spec.spec_id, args.task)
+    if not reports:
+        print("统计: 没有可读取的运行报告（先跑 coding run）")
+        return int(ExitCode.OK)
+    stats = aggregate(reports)
+    print(f"统计: {render_stats(stats)}")
+    for item in reports:
+        print(f"运行: {item.run_id} status={item.status.value} {render_metrics(item.metrics)}")
+    return int(ExitCode.OK)
 
 
 def _app_config_or_default(path: str) -> AppConfig:
