@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from codingwiki.coding.audit import AuditRunner, AuditSink, assert_command_allowed, audit_count
 from codingwiki.coding.backend import load_backend_config, run_backend
 from codingwiki.coding.escalate import build_escalation, escalation_reason, render_escalation
 from codingwiki.coding.packet import build_packet
@@ -10,6 +11,10 @@ from codingwiki.coding.tasks import decompose
 from codingwiki.coding.verify import mechanical_report, verify_patch
 
 __all__ = [
+    "AuditRunner",
+    "AuditSink",
+    "assert_command_allowed",
+    "audit_count",
     "build_escalation",
     "build_packet",
     "decompose",

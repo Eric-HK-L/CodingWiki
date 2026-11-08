@@ -10,12 +10,13 @@ import json
 import shutil
 import subprocess
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from codingwiki.coding.audit import AuditSink
 from codingwiki.domain.coding import BackendConfig, BackendResult, BackendStatus, TaskPacket
 from codingwiki.errors import InputError
 
@@ -46,6 +47,7 @@ def run_backend(
     log_path: Path,
     *,
     now: datetime | None = None,
+    audit: AuditSink | None = None,
 ) -> BackendResult:
     """启动后端进程并归一化结果；命令缺失直接拒绝（不静默 mock）。"""
     return run_command_backend(
@@ -55,6 +57,8 @@ def run_backend(
         result_path,
         log_path,
         now=now,
+        audit=audit,
+        role="backend",
     )
 
 
@@ -66,6 +70,8 @@ def run_command_backend(
     log_path: Path,
     *,
     now: datetime | None = None,
+    audit: AuditSink | None = None,
+    role: str = "backend",
 ) -> BackendResult:
     """通用命令后端（编码与验证共用）：argv 模板 + 超时 + result.json 归一化。"""
     argv = _render_command(config, packet_dir, workspace, result_path)
@@ -75,6 +81,7 @@ def run_command_backend(
     argv[0] = executable
     result_path.parent.mkdir(parents=True, exist_ok=True)
 
+    started_at = datetime.now(UTC)
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -115,6 +122,17 @@ def run_command_backend(
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(_log_text(argv, result), encoding="utf-8")
+    if audit is not None:
+        audit.record(
+            kind=role,
+            argv=argv,
+            cwd=str(workspace.resolve()),
+            status=status.value,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            started_at=started_at,
+            error=error,
+        )
     return result
 
 

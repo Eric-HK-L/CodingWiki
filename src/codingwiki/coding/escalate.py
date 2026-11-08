@@ -284,7 +284,13 @@ def _decisions(reason: EscalationReason, run: CodingRun, spec: SpecDocument) -> 
 def _artifacts(run: CodingRun, run_dir: Path | None) -> list[str]:
     paths: list[str] = []
     if run_dir is not None:
-        for name in ("run.json", "check.json", "verification.json", "baseline/stages.json"):
+        for name in (
+            "run.json",
+            "check.json",
+            "verification.json",
+            "audit/commands.jsonl",
+            "baseline/stages.json",
+        ):
             path = run_dir / name
             if path.is_file():
                 paths.append(str(path))

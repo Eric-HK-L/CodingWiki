@@ -32,6 +32,7 @@ class CommandSpec(_ExecModel):
     timeout_s: int = Field(default=600, ge=1, le=86_400)
     env: dict[str, str] = Field(default_factory=dict)  # 叠加在进程环境之上
     artifacts: list[str] = Field(default_factory=list)  # 期望产物（相对 cwd）
+    label: str = ""  # 审计用标签；不影响执行
 
     @field_validator("argv")
     @classmethod

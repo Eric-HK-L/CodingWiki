@@ -38,6 +38,7 @@ def stage_specs(repo: RepoConfig, *, workspace_root: Path) -> list[tuple[StageKi
                     argv=split_command(text),
                     cwd=str(workspace_root),
                     timeout_s=timeout_s,
+                    label=kind.value,
                 ),
             )
         )
