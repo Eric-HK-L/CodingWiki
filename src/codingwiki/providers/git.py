@@ -139,6 +139,100 @@ class GitProvider:
             raise InputError(f"{worktree} 不是 git 工作树（拿不到 git-common-dir）")
         self._run(["worktree", "remove", "--force", str(worktree)], cwd=Path(common_dir))
 
+    # ------------------------------------------------------------------ 工作树补丁检查（S18）
+
+    def diff_unified(self, worktree: str | Path, base_revision: str) -> str:
+        """工作树相对 base 的 unified diff（0 行上下文、禁用外部 diff/重命名）。
+
+        --no-renames 把重命名拆成删除 + 新增，避免“换个路径绕过允许清单”。
+        """
+        return self._run(
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--unified=0",
+                "--no-renames",
+                base_revision,
+                "--",
+            ],
+            cwd=Path(worktree).resolve(),
+        )
+
+    def diff_numstat(
+        self,
+        worktree: str | Path,
+        base_revision: str,
+        *,
+        ignore_all_space: bool = False,
+        ignore_cr_at_eol: bool = False,
+    ) -> list[tuple[int | None, int | None, str]]:
+        """解析 `git diff --numstat -z`：二进制文件行数为 None。"""
+        args = ["diff", "--numstat", "-z", "--no-renames"]
+        if ignore_all_space:
+            args.append("--ignore-all-space")
+        if ignore_cr_at_eol:
+            args.append("--ignore-cr-at-eol")
+        args += [base_revision, "--"]
+        raw = self._run_bytes(args, cwd=Path(worktree).resolve()).decode("utf-8", errors="replace")
+        records: list[tuple[int | None, int | None, str]] = []
+        for record in raw.split("\x00"):
+            if not record:
+                continue
+            parts = record.split("\t", 2)
+            if len(parts) != 3:
+                continue
+            added, deleted, path = parts
+            records.append(
+                (
+                    None if added == "-" else int(added),
+                    None if deleted == "-" else int(deleted),
+                    path,
+                )
+            )
+        return records
+
+    def untracked_paths(self, worktree: str | Path) -> list[str]:
+        """列出未跟踪且未被 ignore 的文件（新文件也必须纳入检查）。"""
+        raw = self._run_bytes(
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=Path(worktree).resolve(),
+        ).decode("utf-8", errors="replace")
+        return [item for item in raw.split("\x00") if item]
+
+    def read_worktree_file(self, worktree: str | Path, path: str) -> bytes:
+        return (Path(worktree).resolve() / path).read_bytes()
+
+    def read_at_revision(self, worktree: str | Path, revision: str, path: str) -> bytes:
+        """在共享对象库中读取某 revision 的文件（用于换行符/空白对比）。"""
+        return self._run_bytes(["show", f"{revision}:{path}"], cwd=Path(worktree).resolve())
+
+    def reset_worktree(self, worktree: str | Path, revision: str) -> None:
+        """把工作树（含已跟踪文件）重置到基线 revision。"""
+        self._run(["reset", "--hard", revision], cwd=Path(worktree).resolve())
+
+    def clean_worktree(self, worktree: str | Path) -> None:
+        """删除未跟踪文件/目录（不含 ignored 构建产物）。"""
+        self._run(["clean", "-fd"], cwd=Path(worktree).resolve())
+
+    def worktree_status(self, worktree: str | Path) -> str:
+        """`git status --porcelain`，回滚后用于断言工作区干净。"""
+        return self._run(["status", "--porcelain"], cwd=Path(worktree).resolve())
+
+    def delete_branch(self, repo: RepoConfig, branch: str) -> None:
+        """删除工作区分支（任务失败丢弃时；分支不存在时容忍）。"""
+        bare = self._ensure_bare(repo)
+        with suppress(InternalError):
+            self._run(["branch", "-D", branch], cwd=bare)
+
+    def branch_exists(self, repo: RepoConfig, branch: str) -> bool:
+        bare = self._ensure_bare(repo)
+        try:
+            self._run(["rev-parse", "--verify", f"refs/heads/{branch}"], cwd=bare)
+        except InternalError:
+            return False
+        return True
+
     def read_file(self, repo: RepoConfig, revision: str, path: str) -> bytes:
         bare = self._ensure_bare(repo)
         try:

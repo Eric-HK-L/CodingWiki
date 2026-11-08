@@ -365,6 +365,65 @@ def build_parser() -> argparse.ArgumentParser:
     )
     spec_review_parser.set_defaults(handler=_cmd_spec_review)
 
+    patch_parser = subcommands.add_parser(
+        "patch", help="补丁协议与隔离工作区（S18：路径/diff/密钥检查 + 回滚）"
+    )
+    patch_subcommands = patch_parser.add_subparsers(dest="patch_command", required=True)
+
+    patch_ws_parser = patch_subcommands.add_parser("workspace", help="隔离工作区生命周期")
+    patch_ws_subcommands = patch_ws_parser.add_subparsers(dest="workspace_command", required=True)
+    patch_open_parser = patch_ws_subcommands.add_parser("open", help="从固定 revision 建隔离工作树")
+    patch_open_parser.add_argument("--repo", required=True, help="仓库 ID")
+    patch_open_parser.add_argument("--task", required=True, help="任务 ID（如 T-001）")
+    patch_open_parser.add_argument("--revision", default="", help="基线 revision；空表示仓库配置")
+    patch_open_parser.add_argument(
+        "--branch", default="", help="工作区分支名；空表示 cw/<repo>/<task>"
+    )
+    patch_open_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    patch_open_parser.set_defaults(handler=_cmd_patch_workspace_open)
+
+    patch_list_parser = patch_ws_subcommands.add_parser("list", help="列出该仓库的隔离工作区")
+    patch_list_parser.add_argument("--repo", required=True, help="仓库 ID")
+    patch_list_parser.set_defaults(handler=_cmd_patch_workspace_list)
+
+    patch_rollback_parser = patch_ws_subcommands.add_parser(
+        "rollback", help="重置到基线 revision 并清理未跟踪文件"
+    )
+    patch_rollback_parser.add_argument("--repo", required=True, help="仓库 ID")
+    patch_rollback_parser.add_argument("--task", required=True, help="任务 ID")
+    patch_rollback_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    patch_rollback_parser.set_defaults(handler=_cmd_patch_workspace_rollback)
+
+    patch_close_parser = patch_ws_subcommands.add_parser(
+        "close", help="移除工作树；默认丢弃分支，--keep-branch 保留成功分支"
+    )
+    patch_close_parser.add_argument("--repo", required=True, help="仓库 ID")
+    patch_close_parser.add_argument("--task", required=True, help="任务 ID")
+    patch_close_parser.add_argument("--keep-branch", action="store_true", help="保留工作区分支")
+    patch_close_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    patch_close_parser.set_defaults(handler=_cmd_patch_workspace_close)
+
+    patch_check_parser = patch_subcommands.add_parser(
+        "check", help="检查工作区补丁：允许/禁止路径、规模、密钥与内容规则"
+    )
+    patch_check_parser.add_argument("--repo", required=True, help="仓库 ID")
+    patch_check_parser.add_argument("--task", required=True, help="任务 ID")
+    patch_check_parser.add_argument(
+        "--spec-dir", default="", help="approved Spec 目录（提供任务允许文件清单）"
+    )
+    patch_check_parser.add_argument(
+        "--allow", action="append", default=[], help="追加允许路径 glob"
+    )
+    patch_check_parser.add_argument(
+        "--max-files", type=int, default=0, help="文件数上限；0 表示默认 3"
+    )
+    patch_check_parser.add_argument(
+        "--max-lines", type=int, default=0, help="改动行数上限；0 表示默认 300"
+    )
+    patch_check_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    patch_check_parser.add_argument("--json", action="store_true", help="输出机读 JSON 报告")
+    patch_check_parser.set_defaults(handler=_cmd_patch_check)
+
     return parser
 
 
@@ -1091,6 +1150,116 @@ def _cmd_spec_review(args: argparse.Namespace) -> int:
         print(f"已关闭开放问题: {', '.join(args.close_question)}")
     print(f"评审记录: {spec_path.parent / 'review.json'}")
     return int(ExitCode.OK)
+
+
+def _cmd_patch_workspace_open(args: argparse.Namespace) -> int:
+    from typing import cast
+
+    from codingwiki.patch import WorkspaceManager
+    from codingwiki.patch.protocol import WorktreeGit
+
+    repo = load_repo_config(os.path.join(args.config_dir, f"{args.repo}.yaml"))
+    source = create_provider(repo.provider)
+    provider = cast("WorktreeGit", source)
+    revision = args.revision or repo.revision
+    if revision == "latest":
+        revision = source.latest_revision(repo)
+    manager = WorkspaceManager(provider)
+    record = manager.open(repo, args.task, revision, branch=args.branch)
+    print(
+        f"工作区就绪: task={record.task_id}, revision={record.base_revision}, "
+        f"branch={record.branch}"
+    )
+    print(f"工作树: {record.path}")
+    print(f"记录: {manager.record_path(record.repo_id, record.task_id)}")
+    return int(ExitCode.OK)
+
+
+def _cmd_patch_workspace_list(args: argparse.Namespace) -> int:
+    from codingwiki.patch import WorkspaceManager
+
+    manager = WorkspaceManager()
+    records = manager.list(args.repo)
+    if not records:
+        print(f"没有隔离工作区: repo={args.repo}")
+        return int(ExitCode.OK)
+    for record in records:
+        print(
+            f"{record.task_id}\t{record.status.value}\t{record.base_revision}\t"
+            f"{record.branch}\t{record.path}"
+        )
+    return int(ExitCode.OK)
+
+
+def _cmd_patch_workspace_rollback(args: argparse.Namespace) -> int:
+    from typing import cast
+
+    from codingwiki.patch import WorkspaceManager
+    from codingwiki.patch.protocol import WorktreeGit
+
+    repo = load_repo_config(os.path.join(args.config_dir, f"{args.repo}.yaml"))
+    provider = cast("WorktreeGit", create_provider(repo.provider))
+    record = WorkspaceManager(provider).rollback(repo.repo_id, args.task)
+    print(
+        f"已回滚: task={record.task_id}, revision={record.base_revision}, "
+        f"last_rollback_at={record.last_rollback_at}"
+    )
+    return int(ExitCode.OK)
+
+
+def _cmd_patch_workspace_close(args: argparse.Namespace) -> int:
+    from typing import cast
+
+    from codingwiki.patch import WorkspaceManager
+    from codingwiki.patch.protocol import WorktreeGit
+
+    repo = load_repo_config(os.path.join(args.config_dir, f"{args.repo}.yaml"))
+    provider = cast("WorktreeGit", create_provider(repo.provider))
+    record = WorkspaceManager(provider).close(repo, args.task, keep_branch=args.keep_branch)
+    print(
+        f"已关闭: task={record.task_id}, status={record.status.value}, "
+        f"branch={record.branch or '—'}"
+    )
+    return int(ExitCode.OK)
+
+
+def _cmd_patch_check(args: argparse.Namespace) -> int:
+    from typing import cast
+
+    from codingwiki.domain.patch import PatchPolicy, PatchVerdict
+    from codingwiki.patch import WorkspaceManager, check_workspace, load_approved_task
+    from codingwiki.patch.protocol import WorktreeGit
+
+    repo = load_repo_config(os.path.join(args.config_dir, f"{args.repo}.yaml"))
+    provider = cast("WorktreeGit", create_provider(repo.provider))
+    manager = WorkspaceManager(provider)
+    record = manager.load(repo.repo_id, args.task)
+
+    allowed: list[str] = []
+    if args.spec_dir:
+        task = load_approved_task(args.spec_dir, args.task)
+        allowed.extend(task.files)
+    allowed.extend(args.allow)
+    policy = PatchPolicy(
+        allowed_paths=allowed,
+        max_files=args.max_files or 3,
+        max_lines=args.max_lines or 300,
+    )
+    report = check_workspace(provider, record, policy, manager)
+
+    if args.json:
+        print(report.model_dump_json(indent=2))
+    else:
+        print(
+            f"补丁检查: verdict={report.verdict.value}, files={report.stats.files}, "
+            f"lines=+{report.stats.added_lines}/-{report.stats.deleted_lines}, "
+            f"blockers={len(report.blockers)}, warnings={len(report.warnings)}"
+        )
+        for finding in report.findings:
+            print(f"  [{finding.severity.value}] {finding.code}: {finding.message}")
+        print(f"结果: {manager.report_path(record.repo_id, record.task_id)}")
+
+    return int(ExitCode.OK) if report.verdict is PatchVerdict.PASS else int(ExitCode.ENVIRONMENT)
 
 
 def _app_config_or_default(path: str) -> AppConfig:
