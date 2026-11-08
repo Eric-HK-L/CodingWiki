@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from codingwiki.domain.coding import (
+    BackendResult,
     CodingRun,
     CodingRunStatus,
     CodingStats,
@@ -61,6 +62,9 @@ def metrics_of(run: CodingRun) -> RunMetrics:
         skipped_tests=sum(len(item.test_skipped) for item in run.stages),
         guard_rejected=run.stop_reason is CodingStopReason.GUARD_REJECTED,
         verifier_rejected=run.stop_reason is CodingStopReason.VERIFY_REJECTED,
+        budget_exceeded=run.stop_reason
+        in {CodingStopReason.TIME_EXCEEDED, CodingStopReason.TOKEN_EXCEEDED},
+        diff_growing=run.stop_reason is CodingStopReason.DIFF_GROWING,
         regression=regression,
         escalated=run.status is CodingRunStatus.FAILED,
     )
@@ -148,17 +152,25 @@ def _test_ids(stages: list[StageReport]) -> set[str]:
     return {failure.id for stage in stages for failure in stage.test_failures}
 
 
+def tokens_of_result(result: BackendResult) -> tuple[int, int]:
+    """后端自报词元；兼容 tokens_in/out 与 OpenAI usage 两种字段。"""
+    payload = result.result_json
+    total_in = _as_int(payload.get("tokens_in"))
+    total_out = _as_int(payload.get("tokens_out"))
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        total_in += _as_int(usage.get("prompt_tokens"))
+        total_out += _as_int(usage.get("completion_tokens"))
+    return total_in, total_out
+
+
 def _tokens(run: CodingRun) -> tuple[int, int]:
     total_in = 0
     total_out = 0
     for item in run.round_reports:
-        payload = item.backend.result_json
-        total_in += _as_int(payload.get("tokens_in"))
-        total_out += _as_int(payload.get("tokens_out"))
-        usage = payload.get("usage")
-        if isinstance(usage, dict):
-            total_in += _as_int(usage.get("prompt_tokens"))
-            total_out += _as_int(usage.get("completion_tokens"))
+        item_in, item_out = tokens_of_result(item.backend)
+        total_in += item_in
+        total_out += item_out
     return total_in, total_out
 
 
@@ -173,4 +185,5 @@ __all__ = [
     "render_metrics",
     "render_stats",
     "run_report",
+    "tokens_of_result",
 ]
