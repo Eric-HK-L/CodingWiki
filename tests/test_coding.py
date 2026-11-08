@@ -23,6 +23,7 @@ from codingwiki.cli import main
 from codingwiki.coding import (
     assert_command_allowed,
     audit_count,
+    build_delivery,
     build_escalation,
     build_packet,
     decompose,
@@ -46,6 +47,7 @@ from codingwiki.domain.coding import (
     CodingRun,
     CodingRunStatus,
     CodingStopReason,
+    DeliveryBundle,
     EscalationReason,
     EscalationReport,
     ReplayStatus,
@@ -590,6 +592,64 @@ def test_run_task_success(env: CodingEnv, tmp_path: Path) -> None:
     assert (manager.home / "patches" / "demo" / "T-001" / "check.json").is_file()
 
 
+def test_run_task_success_generates_delivery(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, manager, run = _run(env, tmp_path, SUCCESS_BACKEND)
+    delivery_dir = _run_dir(env, run.run_id) / "delivery"
+
+    assert run.delivery_path == str(delivery_dir)
+    for name in ("patch.diff", "delivery.json", "delivery.md", "pr.md"):
+        assert (delivery_dir / name).is_file(), name
+
+    bundle = DeliveryBundle.model_validate_json(
+        (delivery_dir / "delivery.json").read_text(encoding="utf-8")
+    )
+    assert bundle.run_id == run.run_id
+    assert bundle.repo_id == "demo"
+    assert bundle.task_id == "T-001"
+    assert bundle.branch == manager.load("demo", "T-001").branch
+    assert bundle.base_revision == manager.load("demo", "T-001").base_revision
+    assert bundle.title == "[T-001] 为 nvlog 增加日志级别"
+    assert bundle.files == ["nvlog/src/nvlog.c"]
+    assert bundle.patch_path == str(delivery_dir / "patch.diff")
+    assert "int level = 1;" in (delivery_dir / "patch.diff").read_text(encoding="utf-8")
+
+    pr = (delivery_dir / "pr.md").read_text(encoding="utf-8")
+    assert pr.startswith("# [T-001] 为 nvlog 增加日志级别")
+    assert "## 评审清单" in pr
+    assert "## 测试与指标" in pr
+
+    delivery = (delivery_dir / "delivery.md").read_text(encoding="utf-8")
+    assert "## 发布建议（未自动执行）" in delivery
+    assert f"git push origin {bundle.branch}" in delivery
+    assert "gh pr create --head" in delivery
+
+
+def test_run_task_failure_skips_delivery(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, manager, run = _run(env, tmp_path, FAILING_BACKEND, name="failing.py")
+    run_dir = _run_dir(env, run.run_id)
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.delivery_path == ""
+    assert not (run_dir / "delivery").exists()
+    assert (run_dir / "escalation.json").is_file()
+
+
+def test_build_delivery_rejects_failed_run(env: CodingEnv, tmp_path: Path) -> None:
+    repo, manager, _worktree, spec, task = _setup(env)
+    script = _script(tmp_path, FAILING_BACKEND, "failing.py")
+    run = run_task(GitProvider(), manager, repo, spec, task, _config(script))
+
+    with pytest.raises(InputError):
+        build_delivery(
+            GitProvider(),
+            run,
+            spec,
+            task,
+            manager.load("demo", "T-001"),
+            _run_dir(env, run.run_id),
+        )
+
+
 def test_run_task_guard_rejects_forbidden_patch(env: CodingEnv, tmp_path: Path) -> None:
     _repo_obj, manager, run = _run(env, tmp_path, FORBIDDEN_BACKEND, name="forbidden.py")
 
@@ -1044,6 +1104,7 @@ def test_cli_coding_run_with_commands(
     assert "rounds=1/2" in out
     assert "基线: compile:ok" in out
     assert "阶段: compile:ok" in out
+    assert "交付:" in out
 
 
 # ---------------------------------------------------------------- S21 独立验证
