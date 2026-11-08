@@ -16,6 +16,7 @@ from codingwiki.coding.backend import run_backend
 from codingwiki.coding.commands import stage_specs
 from codingwiki.coding.errors import parse_failures, timeout_failure
 from codingwiki.coding.packet import build_packet
+from codingwiki.coding.verify import verify_patch
 from codingwiki.domain.coding import (
     BackendConfig,
     BackendResult,
@@ -29,6 +30,8 @@ from codingwiki.domain.coding import (
     StageKind,
     StageReport,
     StageStatus,
+    VerifierReport,
+    VerifierVerdict,
 )
 from codingwiki.domain.models import RepoConfig
 from codingwiki.domain.patch import (
@@ -75,10 +78,11 @@ def run_task(
     config: BackendConfig,
     *,
     max_rounds: int = 5,
+    verifier: BackendConfig | None = None,
     runner: CommandRunner | None = None,
     now: datetime | None = None,
 ) -> CodingRun:
-    """基线 → 多轮编码；成功保留工作区，失败保留证据，不自动回滚。"""
+    """基线 → 多轮编码 →（可选）独立验证；成功保留工作区，失败保留证据，不自动回滚。"""
     if max_rounds < 1:
         raise InputError(f"max_rounds 必须 ≥1（实际 {max_rounds}）")
     if task.spec_id != spec.spec_id:
@@ -134,6 +138,7 @@ def run_task(
     errors: list[FailureItem] = []
     final_backend: BackendResult | None = None
     final_guard: PatchReport | None = None
+    final_verifier: VerifierReport | None = None
     packet_dir = ""
     previous_keys: set[tuple[str, str, int, str]] | None = None
 
@@ -166,6 +171,7 @@ def run_task(
         final_backend, final_guard = backend, guard
         stages: list[StageReport] = []
         round_errors: list[FailureItem] = []
+        round_verifier: VerifierReport | None = None
         round_message = ""
 
         if backend.status is not BackendStatus.OK:
@@ -183,9 +189,35 @@ def run_task(
                 (item for item in stages if item.status is not StageStatus.OK), None
             )
             if failed_stage is None:
-                stop = CodingStopReason.SUCCEEDED
-                stop_message = f"第 {index} 轮通过：{_stage_summary(stages)}"
-                round_message = stop_message
+                if verifier is not None:
+                    verify_dir = round_dir / "verify"
+                    round_verifier = verify_patch(
+                        provider,
+                        verifier,
+                        spec,
+                        task,
+                        guard,
+                        stages,
+                        workspace,
+                        record.root,
+                        verify_dir,
+                        verify_dir / "result.json",
+                        verify_dir / "backend.log",
+                        now=now,
+                    )
+                    final_verifier = round_verifier
+                    _write_model(round_dir / "verification.json", round_verifier)
+                    _write_model(run_dir / "verification.json", round_verifier)
+                if round_verifier is not None and round_verifier.verdict is VerifierVerdict.FAIL:
+                    stop = CodingStopReason.VERIFY_REJECTED
+                    stop_message = f"独立验证未通过：{len(round_verifier.blockers)} 项 blocker"
+                    round_message = stop_message
+                else:
+                    stop = CodingStopReason.SUCCEEDED
+                    stop_message = f"第 {index} 轮通过：{_stage_summary(stages)}"
+                    if round_verifier is not None:
+                        stop_message = f"{stop_message}，独立验证通过"
+                    round_message = stop_message
             else:
                 round_errors = _errors_of(stages)
                 errors = round_errors
@@ -209,6 +241,7 @@ def run_task(
                 guard=guard,
                 stages=stages,
                 errors=round_errors,
+                verifier=round_verifier,
                 message=round_message,
             )
         )
@@ -236,6 +269,7 @@ def run_task(
         guard=final_guard,
         stages=reports[-1].stages if reports else [],
         errors=reports[-1].errors if reports else [],
+        verifier=final_verifier,
         round_reports=reports,
         message=stop_message,
         now=now,
@@ -263,6 +297,7 @@ def _build_run(
     guard: PatchReport | None = None,
     stages: list[StageReport] | None = None,
     errors: list[FailureItem] | None = None,
+    verifier: VerifierReport | None = None,
     round_reports: list[RoundReport] | None = None,
     now: datetime | None = None,
 ) -> CodingRun:
@@ -283,6 +318,7 @@ def _build_run(
         baseline=baseline,
         stages=stages or [],
         errors=errors or [],
+        verifier=verifier,
         round_reports=round_reports or [],
         message=message,
         created_at=now or datetime.now(UTC),

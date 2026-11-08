@@ -48,7 +48,27 @@ def run_backend(
     now: datetime | None = None,
 ) -> BackendResult:
     """启动后端进程并归一化结果；命令缺失直接拒绝（不静默 mock）。"""
-    argv = _render_command(config, packet.packet_dir, workspace, result_path)
+    return run_command_backend(
+        config,
+        packet.packet_dir,
+        workspace,
+        result_path,
+        log_path,
+        now=now,
+    )
+
+
+def run_command_backend(
+    config: BackendConfig,
+    packet_dir: str,
+    workspace: Path,
+    result_path: Path,
+    log_path: Path,
+    *,
+    now: datetime | None = None,
+) -> BackendResult:
+    """通用命令后端（编码与验证共用）：argv 模板 + 超时 + result.json 归一化。"""
+    argv = _render_command(config, packet_dir, workspace, result_path)
     executable = shutil.which(argv[0])
     if executable is None:
         raise InputError(f"后端命令不存在或不可执行：{argv[0]}")
