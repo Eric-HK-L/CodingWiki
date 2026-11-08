@@ -448,12 +448,15 @@ def build_parser() -> argparse.ArgumentParser:
     coding_packet_build.set_defaults(handler=_cmd_coding_packet_build)
 
     coding_run_parser = coding_subcommands.add_parser(
-        "run", help="多轮编码：基线 → 任务包 → 后端 → PatchGuard → 构建/测试"
+        "run", help="多轮编码：基线 → 任务包 → 后端 → PatchGuard → 构建/测试 → 独立验证"
     )
     coding_run_parser.add_argument("--repo", required=True, help="仓库 ID")
     coding_run_parser.add_argument("--spec-dir", required=True, help="approved Spec 目录")
     coding_run_parser.add_argument("--task", required=True, help="任务 ID")
     coding_run_parser.add_argument("--backend-config", required=True, help="后端 YAML 配置")
+    coding_run_parser.add_argument(
+        "--verifier-config", default="", help="独立验证器 YAML 配置；空表示只跑机械检查"
+    )
     coding_run_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
     coding_run_parser.add_argument(
         "--max-rounds", type=int, default=5, help="最大修复轮次（默认 5）"
@@ -1368,7 +1371,17 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
     spec = load_approved_spec(args.spec_dir)
     task = _coded_task(spec, args.task)
     config = load_backend_config(args.backend_config)
-    run = run_task(provider, manager, repo, spec, task, config, max_rounds=args.max_rounds)
+    verifier = load_backend_config(args.verifier_config) if args.verifier_config else None
+    run = run_task(
+        provider,
+        manager,
+        repo,
+        spec,
+        task,
+        config,
+        max_rounds=args.max_rounds,
+        verifier=verifier,
+    )
 
     run_path = (
         manager.home
@@ -1385,12 +1398,17 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
     files = run.guard.stats.files if run.guard is not None else 0
     added = run.guard.stats.added_lines if run.guard is not None else 0
     deleted = run.guard.stats.deleted_lines if run.guard is not None else 0
+    verify = run.verifier.verdict.value if run.verifier is not None else "skip"
     print(
         f"编码运行: {run.run_id}, status={run.status.value}, "
         f"stop={run.stop_reason.value}, rounds={run.rounds}/{run.max_rounds}, "
-        f"backend={backend}, guard={guard}, "
+        f"backend={backend}, guard={guard}, verify={verify}, "
         f"files={files}, lines=+{added}/-{deleted}"
     )
+    if run.verifier is not None and run.verifier.verdict.value == "fail":
+        for item in run.verifier.issues[:3]:
+            location = f"{item.file}:{item.line}" if item.file else "-"
+            print(f"验证问题: [{item.code}] {location} {item.message}")
     if run.baseline:
         print(f"基线: {' '.join(_stage_line(item) for item in run.baseline)}")
     if run.stages:

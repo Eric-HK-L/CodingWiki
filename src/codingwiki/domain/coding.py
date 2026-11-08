@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import Field, field_validator
 
-from codingwiki.domain.patch import PatchPolicy, PatchReport
+from codingwiki.domain.patch import FindingSeverity, PatchPolicy, PatchReport
 from codingwiki.domain.wiki import _WikiModel
 
 
@@ -38,6 +38,7 @@ class CodingStopReason(StrEnum):
     BASELINE_FAILED = "baseline_failed"
     BACKEND_FAILED = "backend_failed"
     GUARD_REJECTED = "guard_rejected"
+    VERIFY_REJECTED = "verify_rejected"
     ROUNDS_EXHAUSTED = "rounds_exhausted"
     NO_PROGRESS = "no_progress"
 
@@ -87,6 +88,52 @@ class FailureItem(_WikiModel):
     def key(self) -> tuple[str, str, int, str]:
         """去重/无进展判定用的稳定键（消息截断，避免长尾变化）。"""
         return (self.stage.value, self.file, self.line, self.message[:120])
+
+
+class VerifierVerdict(StrEnum):
+    """独立验证结论。"""
+
+    PASS = "pass"
+    FAIL = "fail"
+
+
+class VerifierSource(StrEnum):
+    """问题来源：机械检查（编排器）或外部评审后端。"""
+
+    MECHANICAL = "mechanical"
+    EXTERNAL = "external"
+
+
+class VerifierIssue(_WikiModel):
+    """一条验证问题；必须能落到文件/行或提供证据，否则视为无效输出。"""
+
+    source: VerifierSource
+    code: str = Field(min_length=1)
+    severity: FindingSeverity
+    message: str = Field(min_length=1)
+    file: str = ""
+    line: int = Field(default=0, ge=0)
+    evidence: str = ""
+
+    @property
+    def has_evidence(self) -> bool:
+        return bool(self.evidence) or (bool(self.file) and self.line > 0)
+
+
+class VerifierReport(_WikiModel):
+    """独立验证报告（verification.json）；通过也必须列残余风险。"""
+
+    verdict: VerifierVerdict
+    issues: list[VerifierIssue] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    residual_risks: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    external: bool = False
+    message: str = ""
+
+    @property
+    def blockers(self) -> list[VerifierIssue]:
+        return [item for item in self.issues if item.severity is FindingSeverity.BLOCKER]
 
 
 class CodedTask(_WikiModel):
@@ -178,6 +225,7 @@ class RoundReport(_WikiModel):
     guard: PatchReport
     stages: list[StageReport] = Field(default_factory=list)
     errors: list[FailureItem] = Field(default_factory=list)
+    verifier: VerifierReport | None = None
     message: str = ""
 
 
@@ -200,6 +248,7 @@ class CodingRun(_WikiModel):
     baseline: list[StageReport] = Field(default_factory=list)
     stages: list[StageReport] = Field(default_factory=list)
     errors: list[FailureItem] = Field(default_factory=list)
+    verifier: VerifierReport | None = None
     round_reports: list[RoundReport] = Field(default_factory=list)
     message: str = ""
     created_at: datetime
@@ -220,4 +269,8 @@ __all__ = [
     "StageReport",
     "StageStatus",
     "TaskPacket",
+    "VerifierIssue",
+    "VerifierReport",
+    "VerifierSource",
+    "VerifierVerdict",
 ]

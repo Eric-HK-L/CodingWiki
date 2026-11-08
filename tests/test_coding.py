@@ -1,7 +1,7 @@
-"""S19 编码任务包与模型后端协议测试。
+"""S19–S21 编码任务包、后端协议与独立验证测试。
 
-用本地 git 仓库造 fixture，后端用临时 Python 脚本模拟（不联网、不接真实模型）。
-覆盖：Spec → CodedTask 分解、任务包产物与指纹、后端进程契约、首轮编排与 CLI。
+用本地 git 仓库造 fixture，后端/验证器用临时 Python 脚本模拟（不联网、不接真实模型）。
+覆盖：Spec → CodedTask 分解、任务包产物与指纹、后端进程契约、编排与 CLI、独立验证。
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import subprocess
 import sys
 from collections.abc import Generator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from codingwiki.coding import (
     decompose,
     load_approved_spec,
     load_backend_config,
+    mechanical_report,
     run_backend,
     run_task,
 )
@@ -36,11 +38,13 @@ from codingwiki.domain.coding import (
     CodingRunStatus,
     CodingStopReason,
     StageKind,
+    StageReport,
     StageStatus,
     TaskPacket,
+    VerifierVerdict,
 )
 from codingwiki.domain.models import RepoConfig
-from codingwiki.domain.patch import PatchPolicy, PatchVerdict
+from codingwiki.domain.patch import PatchPolicy, PatchReport, PatchStats, PatchVerdict
 from codingwiki.domain.spec import (
     SPEC_SECTIONS,
     DesignTask,
@@ -1014,3 +1018,317 @@ def test_cli_coding_run_with_commands(
     assert "rounds=1/2" in out
     assert "基线: compile:ok" in out
     assert "阶段: compile:ok" in out
+
+
+# ---------------------------------------------------------------- S21 独立验证
+
+
+VERIFIER_PASS = """\
+import json
+import sys
+from pathlib import Path
+
+result_path = Path(sys.argv[3])
+result_path.write_text(
+    json.dumps(
+        {
+            "verdict": "pass",
+            "issues": [],
+            "evidence": ["diff 与需求逐条核对", "现有测试覆盖新增分支"],
+            "confidence": 0.9,
+            "residual_risks": ["未验证性能开销", "未覆盖并发场景"],
+        },
+        ensure_ascii=False,
+    ),
+    encoding="utf-8",
+)
+"""
+
+VERIFIER_FAIL = """\
+import json
+import sys
+from pathlib import Path
+
+result_path = Path(sys.argv[3])
+result_path.write_text(
+    json.dumps(
+        {
+            "verdict": "fail",
+            "issues": [
+                {
+                    "code": "verify.semantic",
+                    "severity": "blocker",
+                    "message": "级别过滤只在入口判断，未覆盖日志输出路径",
+                    "file": "nvlog/src/nvlog.c",
+                    "line": 12,
+                    "evidence": "diff 只改了入口函数",
+                }
+            ],
+            "confidence": 0.8,
+            "residual_risks": [],
+        },
+        ensure_ascii=False,
+    ),
+    encoding="utf-8",
+)
+"""
+
+VERIFIER_NO_EVIDENCE = """\
+import json
+import sys
+from pathlib import Path
+
+result_path = Path(sys.argv[3])
+result_path.write_text(
+    json.dumps(
+        {
+            "verdict": "fail",
+            "issues": [{"code": "verify.guess", "severity": "blocker", "message": "感觉不对"}],
+            "confidence": 0.5,
+            "residual_risks": [],
+        },
+        ensure_ascii=False,
+    ),
+    encoding="utf-8",
+)
+"""
+
+VERIFIER_NO_RISK = """\
+import json
+import sys
+from pathlib import Path
+
+result_path = Path(sys.argv[3])
+result_path.write_text(
+    json.dumps(
+        {"verdict": "pass", "issues": [], "evidence": ["ok"], "confidence": 1.0},
+        ensure_ascii=False,
+    ),
+    encoding="utf-8",
+)
+"""
+
+
+def _patch_report(*, verdict: PatchVerdict = PatchVerdict.PASS) -> PatchReport:
+    return PatchReport(
+        repo_id="demo",
+        task_id="T-001",
+        base_revision="rev-1",
+        worktree="/tmp/worktree",
+        verdict=verdict,
+        stats=PatchStats(files=1, added_lines=2, deleted_lines=0),
+        policy=PatchPolicy(allowed_paths=["nvlog/src/nvlog.c"]),
+        created_at=datetime.now(UTC),
+    )
+
+
+def _stage(
+    kind: StageKind = StageKind.COMPILE, status: StageStatus = StageStatus.OK
+) -> StageReport:
+    return StageReport(
+        kind=kind,
+        command=["fake"],
+        status=status,
+        exit_code=0 if status is StageStatus.OK else 1,
+        duration_ms=10,
+    )
+
+
+def test_mechanical_report_passes_with_trace_test(env: CodingEnv) -> None:
+    _repo_obj, _manager, worktree, spec, task = _setup(env)
+
+    report = mechanical_report(spec, task, _patch_report(), [_stage()], worktree, "", "")
+
+    assert report.verdict is VerifierVerdict.PASS
+    assert report.confidence == 1.0
+    assert report.residual_risks
+    assert any("trace" in item for item in report.evidence)
+
+
+def test_mechanical_report_finds_missing_test_file(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, _manager, _worktree, spec, task = _setup(env)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    report = mechanical_report(spec, task, _patch_report(), [_stage()], empty, "", "")
+
+    assert report.verdict is VerifierVerdict.FAIL
+    assert report.blockers[0].code == "verify.missing-test"
+    assert report.blockers[0].file == "nvlog/tests/test_nvlog.c"
+
+
+def test_mechanical_report_rejects_disabled_test(env: CodingEnv) -> None:
+    _repo_obj, _manager, worktree, spec, task = _setup(env)
+    diff = (
+        "+++ b/nvlog/tests/test_nvlog.c\n"
+        "+TEST_F(NvlogTest, DISABLED_LevelFilter) { EXPECT_TRUE(true); }\n"
+    )
+
+    report = mechanical_report(spec, task, _patch_report(), [_stage()], worktree, "", diff)
+
+    assert report.verdict is VerifierVerdict.FAIL
+    assert report.blockers[0].code == "verify.disabled-test"
+    assert report.blockers[0].file == "nvlog/tests/test_nvlog.c"
+
+
+def test_mechanical_report_accepts_test_target_names(env: CodingEnv) -> None:
+    _repo_obj, _manager, worktree, _spec, task = _setup(env)
+    spec = _spec_doc(
+        snapshot_id="demo@rev",
+        trace=[
+            TraceRow(
+                requirement_id="R-001",
+                design_section="5 方案设计",
+                code_location="nvlog/src/nvlog.c",
+                test="cuphy_hpp_tests",
+                task="T-001",
+            )
+        ],
+    )
+
+    report = mechanical_report(spec, task, _patch_report(), [_stage()], worktree, "", "")
+
+    assert report.verdict is VerifierVerdict.PASS
+    assert any("test target: cuphy_hpp_tests" in item for item in report.evidence)
+
+
+def _run_with_verifier(
+    env: CodingEnv, tmp_path: Path, verifier_body: str, *, max_rounds: int = 2
+) -> tuple[CodingRun, Path]:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner([_result(), _result()])
+    repo, manager, worktree, spec, task = _setup(env)
+    backend = _config(_script(tmp_path, SUCCESS_BACKEND))
+    verifier_script = _script(tmp_path, verifier_body, "verifier.py")
+    run = run_task(
+        GitProvider(),
+        manager,
+        repo,
+        spec,
+        task,
+        backend,
+        max_rounds=max_rounds,
+        verifier=_config(verifier_script),
+        runner=runner,
+    )
+    return run, worktree
+
+
+def test_run_task_with_verifier_pass(env: CodingEnv, tmp_path: Path) -> None:
+    run, _worktree = _run_with_verifier(env, tmp_path, VERIFIER_PASS)
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert run.stop_reason is CodingStopReason.SUCCEEDED
+    assert run.verifier is not None
+    assert run.verifier.verdict is VerifierVerdict.PASS
+    assert run.verifier.external is True
+    assert run.verifier.confidence == 0.9
+    assert "独立验证通过" in run.message
+
+    run_dir = _run_dir(env, run.run_id)
+    assert (run_dir / "verification.json").is_file()
+    assert (run_dir / "round-1" / "verification.json").is_file()
+    assert (run_dir / "round-1" / "verify" / "verification-request.json").is_file()
+    assert run.round_reports[0].verifier is not None
+
+
+def test_run_task_with_verifier_rejection(env: CodingEnv, tmp_path: Path) -> None:
+    run, worktree = _run_with_verifier(env, tmp_path, VERIFIER_FAIL)
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.VERIFY_REJECTED
+    assert run.rounds == 1
+    assert run.verifier is not None
+    assert run.verifier.blockers[0].code == "verify.semantic"
+    assert run.message == "独立验证未通过：1 项 blocker"
+    assert "int level = 1;" in (worktree / "nvlog/src/nvlog.c").read_text(encoding="utf-8")
+
+
+def test_verifier_rejects_issue_without_evidence(env: CodingEnv, tmp_path: Path) -> None:
+    run, _worktree = _run_with_verifier(env, tmp_path, VERIFIER_NO_EVIDENCE)
+
+    assert run.stop_reason is CodingStopReason.VERIFY_REJECTED
+    assert run.verifier is not None
+    assert run.verifier.blockers[0].code == "verify.invalid-evidence"
+
+
+def test_verifier_requires_residual_risks_on_pass(env: CodingEnv, tmp_path: Path) -> None:
+    run, _worktree = _run_with_verifier(env, tmp_path, VERIFIER_NO_RISK)
+
+    assert run.stop_reason is CodingStopReason.VERIFY_REJECTED
+    assert run.verifier is not None
+    assert run.verifier.blockers[0].code == "verify.no-residual-risk"
+
+
+def test_cli_coding_run_with_verifier(
+    env: CodingEnv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup(env)
+    compile_ok = _script(tmp_path, "import sys\nsys.exit(0)\n", "compile_ok.py")
+    _with_commands(
+        env,
+        f'commands:\n  build:\n    compile: "{sys.executable} {compile_ok}"\n',
+    )
+    spec_dir = _write_spec_dir(tmp_path / "specs", snapshot_id=f"demo@{env.rev}")
+    backend_path = tmp_path / "backend-cli.yaml"
+    backend_path.write_text(
+        yaml.safe_dump(
+            {
+                "kind": "command",
+                "command": [
+                    sys.executable,
+                    str(_script(tmp_path, SUCCESS_BACKEND, "backend_cli.py")),
+                    "{packet_dir}",
+                    "{workspace}",
+                    "{result_path}",
+                ],
+                "timeout_seconds": 30,
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    verifier_path = tmp_path / "verifier-cli.yaml"
+    verifier_path.write_text(
+        yaml.safe_dump(
+            {
+                "kind": "command",
+                "command": [
+                    sys.executable,
+                    str(_script(tmp_path, VERIFIER_PASS, "verifier_cli.py")),
+                    "{packet_dir}",
+                    "{workspace}",
+                    "{result_path}",
+                ],
+                "timeout_seconds": 30,
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "coding",
+            "run",
+            "--spec-dir",
+            str(spec_dir),
+            "--task",
+            "T-001",
+            "--backend-config",
+            str(backend_path),
+            "--verifier-config",
+            str(verifier_path),
+            "--max-rounds",
+            "2",
+            "--config-dir",
+            str(env.config_dir),
+            "--repo",
+            "demo",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0, captured.err
+    assert "verify=pass" in captured.out
+    assert "独立验证通过" in captured.out
