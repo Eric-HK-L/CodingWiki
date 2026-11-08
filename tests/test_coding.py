@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from codingwiki.cli import main
 from codingwiki.coding import (
@@ -35,6 +36,7 @@ from codingwiki.coding import (
 )
 from codingwiki.coding.commands import split_command, stage_specs
 from codingwiki.coding.errors import parse_failures
+from codingwiki.coding.junit import JUnitConfig, load_config, parse_reports
 from codingwiki.coding.metrics import aggregate
 from codingwiki.config import load_repo_config
 from codingwiki.domain.coding import (
@@ -165,6 +167,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[CodingEnv,
     _write(origin / "nvlog/tests/test_nvlog.c", TEST_C)
     _write(origin / "src/cuphy/CMakeLists.txt", CMAKE)
     _write(origin / "third_party/lib/x.c", THIRD_PARTY)
+    _write(origin / ".gitignore", "reports/\n")
     _git(origin, "add", ".")
     _git(origin, "commit", "-m", "base")
     rev = _git(origin, "rev-parse", "HEAD")
@@ -1935,3 +1938,254 @@ def test_cli_report_aggregates(
     assert "统计: runs=1 成功=1（100%）" in captured.out
     assert "一次通过=1（100%）" in captured.out
     assert f"运行: {run.run_id} status=succeeded" in captured.out
+
+
+# ---------------------------------------------------------------- S26 JUnit
+
+
+JUNIT_A = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="nvlog" tests="2" failures="1">
+    <testcase classname="nvlog.case" name="A" file="nvlog/src/nvlog.c" line="12">
+      <failure message="assert A"/>
+    </testcase>
+    <testcase classname="nvlog.case" name="ok"/>
+  </testsuite>
+</testsuites>
+"""
+
+JUNIT_A_B = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="nvlog" tests="3" failures="2">
+    <testcase classname="nvlog.case" name="A" file="nvlog/src/nvlog.c" line="12">
+      <failure message="assert A"/>
+    </testcase>
+    <testcase classname="nvlog.case" name="B">
+      <error message="boom B">traceback</error>
+    </testcase>
+    <testcase classname="nvlog.case" name="ok"/>
+  </testsuite>
+</testsuites>
+"""
+
+JUNIT_SKIPPED = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="nvlog" tests="2" skipped="1">
+    <testcase classname="nvlog.case" name="ok"/>
+    <testcase classname="nvlog.case" name="C">
+      <skipped message="not implemented"/>
+    </testcase>
+  </testsuite>
+</testsuites>
+"""
+
+JUNIT_SKIPPED_CASE = """    <testcase classname="nvlog.case" name="C">
+      <skipped message="not implemented"/>
+    </testcase>
+"""
+
+JUNIT_COMMANDS = """commands:
+  test:
+    fast: "fake-tests"
+    report_format: junit
+    report_paths: ["reports/*.xml"]
+"""
+
+
+class XmlRunner:
+    """按队列返回结果，并在返回前写入 JUnit 报告。"""
+
+    def __init__(self, steps: list[tuple[CommandResult, str]], report: Path) -> None:
+        self._steps = list(steps)
+        self._report = report
+        self.calls: list[CommandSpec] = []
+
+    def run(self, spec: CommandSpec) -> CommandResult:
+        self.calls.append(spec)
+        if not self._steps:
+            raise AssertionError("XmlRunner 结果已耗尽")
+        result, xml = self._steps.pop(0)
+        self._report.parent.mkdir(parents=True, exist_ok=True)
+        self._report.write_text(xml, encoding="utf-8")
+        return result
+
+
+def _run_with_xml(
+    env: CodingEnv,
+    tmp_path: Path,
+    steps: list[tuple[CommandResult, str]],
+    *,
+    max_rounds: int = 5,
+) -> tuple[CodingRun, Path, XmlRunner]:
+    repo, manager, worktree, spec, task = _setup(env)
+    script = _script(tmp_path, SUCCESS_BACKEND)
+    runner = XmlRunner(steps, worktree / "reports" / "tests.xml")
+    run = run_task(
+        GitProvider(),
+        manager,
+        repo,
+        spec,
+        task,
+        _config(script),
+        max_rounds=max_rounds,
+        runner=runner,
+    )
+    return run, worktree, runner
+
+
+def test_junit_parse_reports_extracts_failures_and_skipped(tmp_path: Path) -> None:
+    from codingwiki.domain.coding import TestFailureKind
+
+    report = tmp_path / "reports" / "tests.xml"
+    _write(report, JUNIT_A_B.replace("</testsuite>", JUNIT_SKIPPED_CASE + "</testsuite>"))
+
+    result = parse_reports(JUnitConfig(root=tmp_path, patterns=("reports/*.xml",)))
+
+    assert result.files == ["reports/tests.xml"]
+    assert result.errors == []
+    by_id = {item.id: item for item in result.failures}
+    assert by_id["nvlog.case::A"].kind is TestFailureKind.FAILURE
+    assert by_id["nvlog.case::A"].file == "nvlog/src/nvlog.c"
+    assert by_id["nvlog.case::A"].line == 12
+    assert by_id["nvlog.case::B"].kind is TestFailureKind.ERROR
+    assert by_id["nvlog.case::B"].message == "boom B"
+    assert result.skipped == ["nvlog.case::C"]
+
+
+def test_junit_parse_reports_missing_bad_xml_and_stale(tmp_path: Path) -> None:
+    config = JUnitConfig(root=tmp_path, patterns=("reports/*.xml",))
+    missing = parse_reports(config)
+    assert missing.files == []
+    assert "未找到 JUnit 报告" in missing.errors[0]
+
+    _write(tmp_path / "reports" / "tests.xml", "<testsuite><testcase>")
+    bad = parse_reports(config)
+    assert bad.files == ["reports/tests.xml"]
+    assert "XML 解析失败" in bad.errors[0]
+
+    stale = parse_reports(
+        config, since_ns=(tmp_path / "reports" / "tests.xml").stat().st_mtime_ns + 1
+    )
+    assert stale.files == []
+    assert "未找到 JUnit 报告" in stale.errors[0]
+
+
+def test_test_commands_junit_config() -> None:
+    from codingwiki.domain.models import TestCommands
+
+    commands = TestCommands(report_format="junit", report_paths=["build/reports/*.xml"])
+    config = load_config(commands, source_root=Path("/tmp"))
+
+    assert config is not None
+    assert config.patterns == ("build/reports/*.xml",)
+    assert load_config(TestCommands(fast="ctest"), source_root=Path("/tmp")) is None
+    with pytest.raises(ValidationError):
+        TestCommands(report_format="junit", report_paths=["../outside.xml"])
+    with pytest.raises(ValidationError):
+        TestCommands(report_format="junit", report_paths=["/abs/report.xml"])
+
+
+def test_run_task_junit_new_failure_is_regression(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, JUNIT_COMMANDS)
+    run, _worktree, runner = _run_with_xml(
+        env,
+        tmp_path,
+        [
+            (_result(), JUNIT_A),
+            (_result(CommandStatus.FAILED, stdout="FAILED B\n"), JUNIT_A_B),
+        ],
+        max_rounds=1,
+    )
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.ROUNDS_EXHAUSTED
+    assert {item.code for item in run.errors} == {"test:nvlog.case::A", "test:nvlog.case::B"}
+    assert len(runner.calls) == 2
+
+    report = _report_of(env, run.run_id)
+    assert report.metrics.tests_parsed
+    assert report.metrics.new_failures == 1
+    assert report.metrics.pre_existing_failures == 1
+    assert report.metrics.regression
+
+
+def test_run_task_junit_pre_existing_failure_is_reported(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, JUNIT_COMMANDS)
+    run, _worktree, _runner = _run_with_xml(
+        env,
+        tmp_path,
+        [
+            (_result(), JUNIT_A),
+            (_result(CommandStatus.FAILED, stdout="FAILED B\n"), JUNIT_A_B),
+            (_result(), JUNIT_A),
+        ],
+        max_rounds=2,
+    )
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert run.rounds == 2
+    assert {item.code for item in run.round_reports[0].errors} == {
+        "test:nvlog.case::A",
+        "test:nvlog.case::B",
+    }
+    packet_errors = (_run_dir(env, run.run_id) / "round-2" / "packet" / "errors.json").read_text(
+        encoding="utf-8"
+    )
+    assert "nvlog.case::B" in packet_errors
+
+    report = _report_of(env, run.run_id)
+    assert report.metrics.tests_parsed
+    assert report.metrics.new_failures == 0
+    assert report.metrics.pre_existing_failures == 1
+    assert not report.metrics.regression
+
+
+def test_run_task_junit_skipped_is_not_pass(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, JUNIT_COMMANDS)
+    run, _worktree, _runner = _run_with_xml(
+        env, tmp_path, [(_result(), JUNIT_A), (_result(), JUNIT_SKIPPED)], max_rounds=1
+    )
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.ROUNDS_EXHAUSTED
+    assert "项测试被跳过" in run.round_reports[0].message
+    assert run.errors[0].code == "test.skipped"
+
+    report = _report_of(env, run.run_id)
+    assert report.metrics.skipped_tests == 1
+    assert not report.metrics.regression
+
+
+def test_run_task_junit_baseline_skipped_blocks_backend(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, JUNIT_COMMANDS)
+    run, _worktree, runner = _run_with_xml(env, tmp_path, [(_result(), JUNIT_SKIPPED)])
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.BASELINE_FAILED
+    assert run.backend is None
+    assert "跳过不算通过" in run.message
+    assert len(runner.calls) == 1
+
+
+def test_run_task_junit_bad_xml_falls_back_to_log(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, JUNIT_COMMANDS)
+    run, _worktree, _runner = _run_with_xml(
+        env,
+        tmp_path,
+        [
+            (_result(), JUNIT_A),
+            (_result(CommandStatus.FAILED, stderr="suite crashed\n"), "<not-junit>"),
+        ],
+        max_rounds=1,
+    )
+
+    stage = run.stages[0]
+    assert stage.report_error
+    assert not stage.tests_parsed
+    assert stage.test_failures == []
+    assert run.errors[0].code == "test-fast.failed"
+    assert "suite crashed" in run.errors[0].message
+
+    report = _report_of(env, run.run_id)
+    assert not report.metrics.tests_parsed
+    assert report.metrics.regression

@@ -16,6 +16,7 @@ from codingwiki.domain.coding import (
     CodingStopReason,
     RunMetrics,
     RunReport,
+    StageReport,
     StageStatus,
 )
 
@@ -26,6 +27,22 @@ def metrics_of(run: CodingRun) -> RunMetrics:
     stage_ms += sum(stage.duration_ms for item in run.round_reports for stage in item.stages)
     tokens_in, tokens_out = _tokens(run)
     baseline_ok = all(item.status is StageStatus.OK for item in run.baseline)
+    baseline_ids = _test_ids(run.baseline)
+    final_ids = _test_ids(run.stages)
+    tests_parsed = any(item.tests_parsed for item in run.stages)
+    if tests_parsed:
+        new_failures = len(final_ids - baseline_ids)
+        pre_existing = len(final_ids & baseline_ids)
+        regression = bool(new_failures) or any(
+            item.status is not StageStatus.OK for item in run.stages
+        )
+    else:
+        new_failures = 0
+        pre_existing = len(baseline_ids)
+        regression = baseline_ok and run.stop_reason in {
+            CodingStopReason.ROUNDS_EXHAUSTED,
+            CodingStopReason.NO_PROGRESS,
+        }
     return RunMetrics(
         succeeded=run.status is CodingRunStatus.SUCCEEDED,
         first_pass=run.status is CodingRunStatus.SUCCEEDED and run.rounds == 1,
@@ -38,10 +55,13 @@ def metrics_of(run: CodingRun) -> RunMetrics:
         tokens_out=tokens_out,
         baseline_failures=sum(1 for item in run.baseline if item.status is not StageStatus.OK),
         final_failures=len(run.errors),
+        tests_parsed=tests_parsed,
+        new_failures=new_failures,
+        pre_existing_failures=pre_existing,
+        skipped_tests=sum(len(item.test_skipped) for item in run.stages),
         guard_rejected=run.stop_reason is CodingStopReason.GUARD_REJECTED,
         verifier_rejected=run.stop_reason is CodingStopReason.VERIFY_REJECTED,
-        regression=baseline_ok
-        and run.stop_reason in {CodingStopReason.ROUNDS_EXHAUSTED, CodingStopReason.NO_PROGRESS},
+        regression=regression,
         escalated=run.status is CodingRunStatus.FAILED,
     )
 
@@ -97,13 +117,19 @@ def load_reports(home: Path, repo_id: str, spec_id: str, task_id: str = "") -> l
 
 def render_metrics(metrics: RunMetrics) -> str:
     rate = metrics.tokens_in + metrics.tokens_out
-    return (
+    text = (
         f"耗时={metrics.total_duration_ms / 1000:.1f}s "
         f"轮次={metrics.rounds}/{metrics.max_rounds} "
         f"tokens={metrics.tokens_in}/{metrics.tokens_out}"
         f"{'' if rate else '（未上报）'} "
         f"回归={'是' if metrics.regression else '否'}"
     )
+    if metrics.tests_parsed:
+        text += (
+            f" 测试=新增{metrics.new_failures}/原有{metrics.pre_existing_failures}"
+            f"/跳过{metrics.skipped_tests}"
+        )
+    return text
 
 
 def render_stats(stats: CodingStats) -> str:
@@ -116,6 +142,10 @@ def render_stats(stats: CodingStats) -> str:
         f"guard拒绝={stats.guard_rejected} 验证拒绝={stats.verifier_rejected} "
         f"回归={stats.regression} 升级={stats.escalated}"
     )
+
+
+def _test_ids(stages: list[StageReport]) -> set[str]:
+    return {failure.id for stage in stages for failure in stage.test_failures}
 
 
 def _tokens(run: CodingRun) -> tuple[int, int]:
