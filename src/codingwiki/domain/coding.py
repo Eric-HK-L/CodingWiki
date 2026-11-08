@@ -45,6 +45,7 @@ class CodingStopReason(StrEnum):
     TOKEN_EXCEEDED = "token_exceeded"
     DIFF_GROWING = "diff_growing"
     FLAKY_BASELINE = "flaky_baseline"
+    RED_GATE_FAILED = "red_gate_failed"
 
 
 class RunLimits(_WikiModel):
@@ -81,6 +82,7 @@ class EscalationReason(StrEnum):
     DIFF_GROWING = "diff_growing"
     FLAKY_TESTS = "flaky_tests"
     VERIFIER_REJECTED = "verifier_rejected"
+    TEST_NOT_RED = "test_not_red"
 
 
 class StageKind(StrEnum):
@@ -100,6 +102,45 @@ class StageStatus(StrEnum):
     FAILED = "failed"
     TIMEOUT = "timeout"
     ERROR = "error"
+
+
+class RedGateStatus(StrEnum):
+    """测试先行门禁结论（开发计划 14.5.2）。
+
+    red 表示测试在基线 revision 上按预期失败；green 表示测试一开始就通过，
+    说明没有覆盖新行为（本轮退回）；error 表示门禁本身没能执行。
+    """
+
+    RED = "red"
+    GREEN = "green"
+    ERROR = "error"
+
+
+class RedGateReport(_WikiModel):
+    """一次红门禁的证据（runs/<run_id>/round-N/redgate/redgate.json）。
+
+    在基线 revision 的独立工作树上只应用测试改动后运行 fast 测试；
+    worktree 用完即删，报告与命令输出保留供人工复核。
+    """
+
+    repo_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    base_revision: str = Field(min_length=1)
+    status: RedGateStatus
+    test_files: list[str] = Field(default_factory=list)
+    command: list[str] = Field(default_factory=list)
+    exit_code: int = 0
+    duration_ms: int = Field(default=0, ge=0)
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    message: str = ""
+    worktree: str = ""
+    report_path: str = ""
+    created_at: datetime
+
+    @property
+    def blocked(self) -> bool:
+        return self.status is RedGateStatus.GREEN
 
 
 class TestFailureKind(StrEnum):
@@ -294,6 +335,7 @@ class RoundReport(_WikiModel):
     stages: list[StageReport] = Field(default_factory=list)
     errors: list[FailureItem] = Field(default_factory=list)
     verifier: VerifierReport | None = None
+    red_gate: RedGateReport | None = None
     message: str = ""
 
 
@@ -404,6 +446,7 @@ class RunMetrics(_WikiModel):
     verifier_rejected: bool = False
     budget_exceeded: bool = False
     diff_growing: bool = False
+    red_gate_blocked: bool = False
     regression: bool = False
     escalated: bool = False
 
@@ -472,6 +515,7 @@ class CodingRun(_WikiModel):
     stages: list[StageReport] = Field(default_factory=list)
     errors: list[FailureItem] = Field(default_factory=list)
     verifier: VerifierReport | None = None
+    red_gate: RedGateReport | None = None
     round_reports: list[RoundReport] = Field(default_factory=list)
     limits: RunLimits = Field(default_factory=RunLimits)
     quarantined_tests: list[str] = Field(default_factory=list)
@@ -517,6 +561,8 @@ __all__ = [
     "EscalationReason",
     "EscalationReport",
     "FailureItem",
+    "RedGateReport",
+    "RedGateStatus",
     "ReplayCheck",
     "ReplayReport",
     "ReplayStatus",
