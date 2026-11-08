@@ -20,9 +20,12 @@ def stage_specs(
     *,
     workspace_root: Path,
     tmp_dir: Path | None = None,
+    incremental: bool = False,
 ) -> list[tuple[StageKind, CommandSpec]]:
     """按 configure → lint → compile → test-fast → test-full 生成非空阶段。
 
+    incremental=True 时编译阶段优先用 build.incremental（修复轮次走
+    “只构建受影响目标”的快速通道）；未配置则回退 build.compile。
     tmp_dir 传入时给每条命令注入 TMPDIR（运行级临时目录，结束后由编排器清理）；
     CPU 上限取自 repo.resources。
     """
@@ -30,15 +33,20 @@ def stage_specs(
     test = repo.commands.test
     lint = repo.commands.lint
     env = {"TMPDIR": str(tmp_dir)} if tmp_dir is not None else {}
+    compile_text = build.compile
+    compile_label = StageKind.COMPILE.value
+    if incremental and build.incremental.strip():
+        compile_text = build.incremental
+        compile_label = "compile-incremental"
     entries = [
-        (StageKind.CONFIGURE, build.configure, build.timeout_s),
-        (StageKind.LINT, lint.command, lint.timeout_s),
-        (StageKind.COMPILE, build.compile, build.timeout_s),
-        (StageKind.TEST_FAST, test.fast, test.timeout_s),
-        (StageKind.TEST_FULL, test.full, test.timeout_s),
+        (StageKind.CONFIGURE, build.configure, build.timeout_s, StageKind.CONFIGURE.value),
+        (StageKind.LINT, lint.command, lint.timeout_s, StageKind.LINT.value),
+        (StageKind.COMPILE, compile_text, build.timeout_s, compile_label),
+        (StageKind.TEST_FAST, test.fast, test.timeout_s, StageKind.TEST_FAST.value),
+        (StageKind.TEST_FULL, test.full, test.timeout_s, StageKind.TEST_FULL.value),
     ]
     specs: list[tuple[StageKind, CommandSpec]] = []
-    for kind, text, timeout_s in entries:
+    for kind, text, timeout_s, label in entries:
         if not text.strip():
             continue
         specs.append(
@@ -49,7 +57,7 @@ def stage_specs(
                     cwd=str(workspace_root),
                     timeout_s=timeout_s,
                     env=dict(env),
-                    label=kind.value,
+                    label=label,
                     cpu_seconds=repo.resources.cpu_seconds,
                 ),
             )

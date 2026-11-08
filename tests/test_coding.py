@@ -921,7 +921,8 @@ def test_stage_specs_order_cwd_and_timeouts(tmp_path: Path) -> None:
         "provider: git\n"
         "url: ./origin\n"
         "commands:\n"
-        '  build: {configure: "cfg-cmd", compile: "build-cmd", timeout_s: 120}\n'
+        '  build: {configure: "cfg-cmd", compile: "build-cmd",\n'
+        '    incremental: "inc-cmd", timeout_s: 120}\n'
         '  lint: {command: "lint-cmd", timeout_s: 30}\n'
         '  test: {fast: "fast-cmd", full: "full-cmd", timeout_s: 900}\n'
         "resources: {cpu_seconds: 90}\n",
@@ -951,6 +952,28 @@ def test_stage_specs_order_cwd_and_timeouts(tmp_path: Path) -> None:
     plain = stage_specs(repo, workspace_root=root)
     assert plain[0][1].env == {}
     assert plain[0][1].cpu_seconds == 90
+
+    # 修复轮次：编译阶段切到增量命令，标签区分全量/增量
+    repair = stage_specs(repo, workspace_root=root, incremental=True)
+    assert repair[2][1].argv == ["inc-cmd"]
+    assert repair[2][1].label == "compile-incremental"
+    assert pairs[2][1].label == "compile"
+
+
+def test_stage_specs_incremental_falls_back_to_compile(tmp_path: Path) -> None:
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    (config_dir / "demo.yaml").write_text(
+        "repo_id: demo\nprovider: git\nurl: https://example.com/demo.git\n"
+        'commands:\n  build: {compile: "build-cmd"}\n',
+        encoding="utf-8",
+    )
+    repo = load_repo_config(config_dir / "demo.yaml")
+
+    specs = stage_specs(repo, workspace_root=tmp_path, incremental=True)
+
+    assert specs[0][1].argv == ["build-cmd"]
+    assert specs[0][1].label == "compile"
 
 
 def test_resource_limits_validation() -> None:
@@ -1011,6 +1034,20 @@ def test_run_task_with_stages_one_round(env: CodingEnv, tmp_path: Path) -> None:
     assert len(runner.calls) == 2
     assert runner.calls[0].cwd == str(worktree)
     assert run.message.startswith("第 1 轮通过：compile:ok")
+
+
+def test_repair_rounds_use_incremental_build(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(
+        env,
+        'commands:\n  build:\n    compile: "full-build"\n    incremental: "inc-build"\n',
+    )
+    runner = FakeRunner([_result(), _result()])
+
+    run, _worktree = _run_with_runner(env, tmp_path, runner)
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert [call.argv for call in runner.calls] == [["full-build"], ["inc-build"]]
+    assert [call.label for call in runner.calls] == ["compile", "compile-incremental"]
 
 
 def test_run_task_round_two_converges(env: CodingEnv, tmp_path: Path) -> None:

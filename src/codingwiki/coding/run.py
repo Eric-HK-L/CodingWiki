@@ -121,8 +121,9 @@ def run_task(
     source_root = workspace / record.root if record.root else workspace
     tmp_dir = run_dir / "tmp"
     pairs = stage_specs(repo, workspace_root=source_root, tmp_dir=tmp_dir)
+    repair_pairs = stage_specs(repo, workspace_root=source_root, tmp_dir=tmp_dir, incremental=True)
     junit = load_config(repo.commands.test, source_root=source_root)
-    for kind, stage_spec in pairs:
+    for kind, stage_spec in [*pairs, *repair_pairs]:
         assert_command_allowed(stage_spec.argv, source=f"阶段 {kind.value}")
     assert_command_allowed(config.command, source="编码后端")
     if verifier is not None:
@@ -230,7 +231,7 @@ def run_task(
             round_message = stop_message
         else:
             stages = run_stages(
-                pairs,
+                repair_pairs,
                 runner,
                 junit=junit,
                 attempts=repo.commands.test.retries + 1,
