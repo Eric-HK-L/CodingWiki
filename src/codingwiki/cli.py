@@ -1361,7 +1361,7 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
     from typing import cast
 
     from codingwiki.coding import load_approved_spec, load_backend_config, run_task
-    from codingwiki.domain.coding import CodingRunStatus
+    from codingwiki.domain.coding import CodingRunStatus, EscalationReport
     from codingwiki.patch import WorkspaceManager
     from codingwiki.patch.protocol import WorktreeGit
 
@@ -1415,6 +1415,14 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
         print(f"阶段: {' '.join(_stage_line(item) for item in run.stages)}")
     if run.message:
         print(f"说明: {run.message}")
+    if run.escalation_path:
+        escalation = EscalationReport.model_validate_json(
+            Path(run.escalation_path).read_text(encoding="utf-8")
+        )
+        print(f"升级: {run.escalation_path} 原因={escalation.reason.value}")
+        print(f"升级摘要: {escalation.summary}")
+        for decision in escalation.decisions[:3]:
+            print(f"待决定: {decision}")
     print(f"结果: {run_path}")
     return (
         int(ExitCode.OK) if run.status is CodingRunStatus.SUCCEEDED else int(ExitCode.ENVIRONMENT)

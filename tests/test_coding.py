@@ -19,11 +19,13 @@ import yaml
 
 from codingwiki.cli import main
 from codingwiki.coding import (
+    build_escalation,
     build_packet,
     decompose,
     load_approved_spec,
     load_backend_config,
     mechanical_report,
+    render_escalation,
     run_backend,
     run_task,
 )
@@ -37,6 +39,8 @@ from codingwiki.domain.coding import (
     CodingRun,
     CodingRunStatus,
     CodingStopReason,
+    EscalationReason,
+    EscalationReport,
     StageKind,
     StageReport,
     StageStatus,
@@ -44,10 +48,18 @@ from codingwiki.domain.coding import (
     VerifierVerdict,
 )
 from codingwiki.domain.models import RepoConfig
-from codingwiki.domain.patch import PatchPolicy, PatchReport, PatchStats, PatchVerdict
+from codingwiki.domain.patch import (
+    FindingSeverity,
+    PatchFinding,
+    PatchPolicy,
+    PatchReport,
+    PatchStats,
+    PatchVerdict,
+)
 from codingwiki.domain.spec import (
     SPEC_SECTIONS,
     DesignTask,
+    OpenQuestion,
     SourceDocument,
     SpecDocument,
     SpecSection,
@@ -1332,3 +1344,203 @@ def test_cli_coding_run_with_verifier(
     assert rc == 0, captured.err
     assert "verify=pass" in captured.out
     assert "独立验证通过" in captured.out
+
+
+# ---------------------------------------------------------------- S22 失败升级
+
+
+def _escalation_of(run: CodingRun) -> EscalationReport:
+    assert run.escalation_path, "失败运行必须生成 escalation.json"
+    return EscalationReport.model_validate_json(
+        Path(run.escalation_path).read_text(encoding="utf-8")
+    )
+
+
+def test_run_task_success_has_no_escalation(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, _manager, run = _run(env, tmp_path, SUCCESS_BACKEND)
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert run.escalation_path == ""
+    run_dir = _run_dir(env, run.run_id)
+    assert not (run_dir / "escalation.json").exists()
+    assert not (run_dir / "escalation.md").exists()
+
+
+def test_guard_rejection_escalates_forbidden_file(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, _manager, run = _run(env, tmp_path, FORBIDDEN_BACKEND, name="forbidden.py")
+    report = _escalation_of(run)
+
+    assert report.reason is EscalationReason.FORBIDDEN_FILE
+    assert report.stop_reason is CodingStopReason.GUARD_REJECTED
+    assert report.attempted_rounds == 1
+    assert any(item.source == "guard" for item in report.failures)
+    assert any("path.forbidden" in item.code for item in report.failures)
+
+    run_dir = _run_dir(env, run.run_id)
+    text = (run_dir / "escalation.md").read_text(encoding="utf-8")
+    for section in (
+        "## 任务与需求",
+        "## 已尝试",
+        "## 失败信息",
+        "## 需要人做的决定",
+        "## 建议下一步",
+        "## 产物",
+    ):
+        assert section in text
+
+
+def test_backend_failure_escalates_backend_failed(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, _manager, run = _run(env, tmp_path, FAILING_BACKEND, name="failing.py")
+    report = _escalation_of(run)
+
+    assert report.reason is EscalationReason.BACKEND_FAILED
+    assert report.stop_reason is CodingStopReason.BACKEND_FAILED
+    assert report.summary == "后端未成功：failed"
+    assert report.failures[0].source == "run"
+
+
+def test_no_progress_escalates_no_progress(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner(
+        [
+            _result(),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+        ]
+    )
+    run, _worktree = _run_with_runner(env, tmp_path, runner, max_rounds=5)
+    report = _escalation_of(run)
+
+    assert report.reason is EscalationReason.NO_PROGRESS
+    assert report.attempted_rounds == 2
+    assert len(report.attempts) == 2
+    assert report.failures[0].code == "compile.diagnostic"
+
+
+def test_rounds_exhausted_escalates_rounds_exhausted(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner(
+        [
+            _result(),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+            _result(
+                CommandStatus.FAILED,
+                stderr="nvlog/src/nvlog.c:20:5: error: another failure\n",
+            ),
+        ]
+    )
+    run, _worktree = _run_with_runner(env, tmp_path, runner, max_rounds=2)
+    report = _escalation_of(run)
+
+    assert report.reason is EscalationReason.ROUNDS_EXHAUSTED
+    assert report.attempted_rounds == 2
+    assert report.max_rounds == 2
+    assert report.summary == "2 轮后仍有 1 项失败"
+
+
+def test_verifier_rejection_escalates_verifier_rejected(env: CodingEnv, tmp_path: Path) -> None:
+    run, _worktree = _run_with_verifier(env, tmp_path, VERIFIER_FAIL)
+    report = _escalation_of(run)
+
+    assert report.reason is EscalationReason.VERIFIER_REJECTED
+    assert report.stop_reason is CodingStopReason.VERIFY_REJECTED
+    assert report.failures[0].source == "verifier"
+    assert report.failures[0].code == "verify.semantic"
+    assert "逐条核对 verification.json" in report.suggested_next_steps[0]
+
+
+def test_baseline_failure_escalates_environment(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner([_result(CommandStatus.FAILED, stderr=GCC_ERROR)])
+    run, _worktree = _run_with_runner(env, tmp_path, runner)
+    report = _escalation_of(run)
+
+    assert report.reason is EscalationReason.ENVIRONMENT_BROKEN
+    assert report.attempted_rounds == 0
+    assert report.failures[0].source == "baseline"
+    assert report.failures[0].code == "compile.failed"
+    assert report.attempts[0].startswith("基线：")
+
+
+def test_escalation_reason_security_and_open_question(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, _manager, run = _run(env, tmp_path, FORBIDDEN_BACKEND, name="forbidden.py")
+    spec = _spec_doc(snapshot_id=f"demo@{env.rev}")
+    task = next(item for item in decompose(spec) if item.id == "T-001")
+    run_dir = _run_dir(env, run.run_id)
+
+    assert run.guard is not None
+    secret_guard = run.guard.model_copy(
+        update={
+            "findings": [
+                PatchFinding(
+                    code="diff.secret",
+                    severity=FindingSeverity.BLOCKER,
+                    message="新增内容疑似密钥",
+                    path="nvlog/src/nvlog.c",
+                )
+            ]
+        }
+    )
+    secret_run = run.model_copy(update={"guard": secret_guard})
+    secret = build_escalation(secret_run, spec, task, run_dir)
+    assert secret.reason is EscalationReason.SECURITY_ALERT
+    assert any("人工审计命中的规则" in item for item in secret.decisions)
+    assert any(item.source == "guard" for item in secret.failures)
+
+    open_spec = spec.model_copy(
+        update={"questions": [OpenQuestion(id="Q-001", question="级别取值如何映射？")]}
+    )
+    pending = build_escalation(run, open_spec, task, run_dir)
+    assert pending.reason is EscalationReason.REQUIREMENT_DECISION
+    assert any("Q-001" in item for item in pending.decisions)
+    assert "关闭或转交 Spec 开放问题：Q-001" in render_escalation(pending, open_spec, task)
+
+
+def test_cli_coding_run_prints_escalation(
+    env: CodingEnv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup(env)
+    spec_dir = _write_spec_dir(tmp_path / "specs", snapshot_id=f"demo@{env.rev}")
+    backend_path = tmp_path / "backend-cli.yaml"
+    backend_path.write_text(
+        yaml.safe_dump(
+            {
+                "kind": "command",
+                "command": [
+                    sys.executable,
+                    str(_script(tmp_path, FAILING_BACKEND, "failing_cli.py")),
+                    "{packet_dir}",
+                    "{workspace}",
+                    "{result_path}",
+                ],
+                "timeout_seconds": 30,
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "coding",
+            "run",
+            "--spec-dir",
+            str(spec_dir),
+            "--task",
+            "T-001",
+            "--backend-config",
+            str(backend_path),
+            "--max-rounds",
+            "1",
+            "--config-dir",
+            str(env.config_dir),
+            "--repo",
+            "demo",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 3, captured.err
+    assert "升级: " in captured.out
+    assert "原因=backend_failed" in captured.out
+    assert "待决定: 检查模型后端进程、凭据与超时配置" in captured.out

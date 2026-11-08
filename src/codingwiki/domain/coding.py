@@ -43,6 +43,23 @@ class CodingStopReason(StrEnum):
     NO_PROGRESS = "no_progress"
 
 
+class EscalationReason(StrEnum):
+    """升级给人处理的首要原因（开发计划 14.10）。
+
+    比 stop_reason 更贴近人的决策：同一个 guard_rejected 可能是越界修改，
+    也可能是密钥告警，人工需要看的材料不同。
+    """
+
+    REQUIREMENT_DECISION = "requirement_decision"
+    ENVIRONMENT_BROKEN = "environment_broken"
+    BACKEND_FAILED = "backend_failed"
+    FORBIDDEN_FILE = "forbidden_file"
+    SECURITY_ALERT = "security_alert"
+    NO_PROGRESS = "no_progress"
+    ROUNDS_EXHAUSTED = "rounds_exhausted"
+    VERIFIER_REJECTED = "verifier_rejected"
+
+
 class StageKind(StrEnum):
     """编排器执行的检查阶段（14.5.4 / 14.7.1）。"""
 
@@ -229,6 +246,38 @@ class RoundReport(_WikiModel):
     message: str = ""
 
 
+class EscalationFailure(_WikiModel):
+    """升级单里的一条失败/拦截项；来源不限于某个构建阶段。"""
+
+    source: str = Field(min_length=1)
+    code: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    file: str = ""
+    line: int = Field(default=0, ge=0)
+
+
+class EscalationReport(_WikiModel):
+    """一次失败运行的升级单（escalation.json）；成功运行不生成。"""
+
+    run_id: str = Field(pattern=r"^RUN-[A-Za-z0-9._-]+$")
+    repo_id: str = Field(min_length=1)
+    spec_id: str = Field(pattern=r"^F-\d{3}$")
+    task_id: str = Field(pattern=r"^T-\d{3}$")
+    status: CodingRunStatus
+    stop_reason: CodingStopReason
+    reason: EscalationReason
+    summary: str = Field(min_length=1)
+    attempted_rounds: int = Field(default=0, ge=0)
+    max_rounds: int = Field(default=1, ge=1)
+    attempts: list[str] = Field(default_factory=list)
+    failures: list[EscalationFailure] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    suggested_next_steps: list[str] = Field(default_factory=list)
+    artifacts: list[str] = Field(default_factory=list)
+    workspace: str = ""
+    created_at: datetime
+
+
 class CodingRun(_WikiModel):
     """一次编码运行（runs/<run_id>/run.json）。"""
 
@@ -243,6 +292,7 @@ class CodingRun(_WikiModel):
     rounds: int = Field(default=0, ge=0)
     max_rounds: int = Field(default=1, ge=1)
     packet_dir: str = ""
+    escalation_path: str = ""
     backend: BackendResult | None = None
     guard: PatchReport | None = None
     baseline: list[StageReport] = Field(default_factory=list)
@@ -263,6 +313,9 @@ __all__ = [
     "CodingRunStatus",
     "CodingStopReason",
     "ContextFile",
+    "EscalationFailure",
+    "EscalationReason",
+    "EscalationReport",
     "FailureItem",
     "RoundReport",
     "StageKind",
