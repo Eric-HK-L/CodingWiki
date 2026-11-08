@@ -35,6 +35,10 @@ class WorkspaceManager:
             raise InternalError("未提供 git provider，无法执行工作区写操作")
         return self._provider
 
+    @property
+    def home(self) -> Path:
+        return self._home
+
     # ------------------------------------------------------------------ 路径
 
     def worktree_path(self, repo_id: str, task_id: str) -> Path:

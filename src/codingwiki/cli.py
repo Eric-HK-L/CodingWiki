@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from codingwiki.domain.coding import CodedTask
     from codingwiki.domain.eval import EvalReport, QuestionResult
     from codingwiki.domain.job import JobRecord
     from codingwiki.domain.spec import EvidenceBundle, ExtractionResult, Requirement, SpecDocument
@@ -423,6 +424,38 @@ def build_parser() -> argparse.ArgumentParser:
     patch_check_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
     patch_check_parser.add_argument("--json", action="store_true", help="输出机读 JSON 报告")
     patch_check_parser.set_defaults(handler=_cmd_patch_check)
+
+    coding_parser = subcommands.add_parser(
+        "coding", help="编码任务包与模型后端（S19：首轮编码，不跑编译/测试）"
+    )
+    coding_subcommands = coding_parser.add_subparsers(dest="coding_command", required=True)
+
+    coding_task_parser = coding_subcommands.add_parser("task", help="编码任务分解")
+    coding_task_sub = coding_task_parser.add_subparsers(dest="coding_task_command", required=True)
+    coding_task_list = coding_task_sub.add_parser("list", help="列出 approved Spec 的编码任务")
+    coding_task_list.add_argument("--spec-dir", required=True, help="approved Spec 目录")
+    coding_task_list.set_defaults(handler=_cmd_coding_task_list)
+
+    coding_packet_parser = coding_subcommands.add_parser("packet", help="聚焦上下文任务包")
+    coding_packet_sub = coding_packet_parser.add_subparsers(
+        dest="coding_packet_command", required=True
+    )
+    coding_packet_build = coding_packet_sub.add_parser("build", help="为任务生成任务包")
+    coding_packet_build.add_argument("--repo", required=True, help="仓库 ID")
+    coding_packet_build.add_argument("--spec-dir", required=True, help="approved Spec 目录")
+    coding_packet_build.add_argument("--task", required=True, help="任务 ID")
+    coding_packet_build.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    coding_packet_build.set_defaults(handler=_cmd_coding_packet_build)
+
+    coding_run_parser = coding_subcommands.add_parser(
+        "run", help="首轮编码：任务包 → 后端 → PatchGuard"
+    )
+    coding_run_parser.add_argument("--repo", required=True, help="仓库 ID")
+    coding_run_parser.add_argument("--spec-dir", required=True, help="approved Spec 目录")
+    coding_run_parser.add_argument("--task", required=True, help="任务 ID")
+    coding_run_parser.add_argument("--backend-config", required=True, help="后端 YAML 配置")
+    coding_run_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    coding_run_parser.set_defaults(handler=_cmd_coding_run)
 
     return parser
 
@@ -1260,6 +1293,102 @@ def _cmd_patch_check(args: argparse.Namespace) -> int:
         print(f"结果: {manager.report_path(record.repo_id, record.task_id)}")
 
     return int(ExitCode.OK) if report.verdict is PatchVerdict.PASS else int(ExitCode.ENVIRONMENT)
+
+
+def _coded_task(spec: SpecDocument, task_id: str) -> CodedTask:
+    from codingwiki.coding import decompose
+
+    for item in decompose(spec):
+        if item.id == task_id:
+            return item
+    raise InputError(f"Spec {spec.spec_id} 没有任务 {task_id}")
+
+
+def _cmd_coding_task_list(args: argparse.Namespace) -> int:
+    from codingwiki.coding import decompose, load_approved_spec
+
+    spec = load_approved_spec(args.spec_dir)
+    tasks = decompose(spec)
+    print(f"编码任务: spec={spec.spec_id}, tasks={len(tasks)}")
+    for item in tasks:
+        print(
+            f"{item.id}\t{item.title}\tfiles={len(item.files_allowed)}\t"
+            f"req={'/'.join(item.requirement_ids) or '—'}\tdeps={'/'.join(item.depends_on) or '—'}"
+        )
+    return int(ExitCode.OK)
+
+
+def _cmd_coding_packet_build(args: argparse.Namespace) -> int:
+    from typing import cast
+
+    from codingwiki.coding import build_packet, load_approved_spec
+    from codingwiki.domain.patch import PatchPolicy
+    from codingwiki.patch import WorkspaceManager
+    from codingwiki.patch.protocol import WorktreeGit
+
+    repo = load_repo_config(os.path.join(args.config_dir, f"{args.repo}.yaml"))
+    provider = cast("WorktreeGit", create_provider(repo.provider))
+    manager = WorkspaceManager(provider)
+    record = manager.load(repo.repo_id, args.task)
+    spec = load_approved_spec(args.spec_dir)
+    task = _coded_task(spec, args.task)
+    packet_dir = manager.home / "coding" / repo.repo_id / spec.spec_id / task.id / "packet"
+    packet = build_packet(
+        repo_id=repo.repo_id,
+        spec=spec,
+        task=task,
+        workspace=Path(record.path),
+        base_revision=record.base_revision,
+        packet_dir=packet_dir,
+        policy=PatchPolicy(allowed_paths=task.files_allowed),
+        root=record.root,
+    )
+    print(f"任务包: {packet.packet_id}")
+    print(f"目录: {packet.packet_dir}")
+    print(f"上下文文件: {len(packet.context_files)}")
+    for item in packet.context_files:
+        print(f"  {item.path}\t{item.sha256[:12]}\t{item.size}B")
+    return int(ExitCode.OK)
+
+
+def _cmd_coding_run(args: argparse.Namespace) -> int:
+    from typing import cast
+
+    from codingwiki.coding import load_approved_spec, load_backend_config, run_task
+    from codingwiki.domain.coding import CodingRunStatus
+    from codingwiki.patch import WorkspaceManager
+    from codingwiki.patch.protocol import WorktreeGit
+
+    repo = load_repo_config(os.path.join(args.config_dir, f"{args.repo}.yaml"))
+    provider = cast("WorktreeGit", create_provider(repo.provider))
+    manager = WorkspaceManager(provider)
+    spec = load_approved_spec(args.spec_dir)
+    task = _coded_task(spec, args.task)
+    config = load_backend_config(args.backend_config)
+    run = run_task(provider, manager, repo, spec, task, config)
+
+    run_path = (
+        manager.home
+        / "coding"
+        / repo.repo_id
+        / spec.spec_id
+        / task.id
+        / "runs"
+        / run.run_id
+        / "run.json"
+    )
+    print(
+        f"编码运行: {run.run_id}, status={run.status.value}, "
+        f"backend={run.backend.status.value}, guard={run.guard.verdict.value}, "
+        f"files={run.guard.stats.files}, "
+        f"lines=+{run.guard.stats.added_lines}/-{run.guard.stats.deleted_lines}"
+    )
+    if run.message:
+        print(f"说明: {run.message}")
+    print(f"结果: {run_path}")
+    return (
+        int(ExitCode.OK) if run.status is CodingRunStatus.SUCCEEDED else int(ExitCode.ENVIRONMENT)
+    )
 
 
 def _app_config_or_default(path: str) -> AppConfig:
