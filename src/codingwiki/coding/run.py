@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from codingwiki.coding.backend import run_backend
 from codingwiki.coding.commands import stage_specs
 from codingwiki.coding.errors import parse_failures, timeout_failure
+from codingwiki.coding.escalate import build_escalation, render_escalation
 from codingwiki.coding.packet import build_packet
 from codingwiki.coding.verify import verify_patch
 from codingwiki.domain.coding import (
@@ -129,8 +130,7 @@ def run_task(
             message=f"基线未通过：{failed.kind.value}（exit {failed.exit_code}），拒绝交给模型",
             now=now,
         )
-        _write_model(run_dir / "run.json", run)
-        return run
+        return _finish_run(run_dir, run, spec, task, now=now)
 
     stop: CodingStopReason | None = None
     stop_message = ""
@@ -274,8 +274,7 @@ def run_task(
         message=stop_message,
         now=now,
     )
-    _write_model(run_dir / "run.json", run)
-    return run
+    return _finish_run(run_dir, run, spec, task, now=now)
 
 
 def _build_run(
@@ -323,6 +322,29 @@ def _build_run(
         message=message,
         created_at=now or datetime.now(UTC),
     )
+
+
+def _finish_run(
+    run_dir: Path,
+    run: CodingRun,
+    spec: SpecDocument,
+    task: CodedTask,
+    *,
+    now: datetime | None,
+) -> CodingRun:
+    """写 run.json；失败时追加 escalation.json/md，成功不生成升级单。"""
+    if run.status is CodingRunStatus.FAILED:
+        escalation_path = run_dir / "escalation.json"
+        run = run.model_copy(update={"escalation_path": str(escalation_path)})
+        _write_model(run_dir / "run.json", run)
+        escalation = build_escalation(run, spec, task, run_dir, now=now)
+        _write_model(escalation_path, escalation)
+        (run_dir / "escalation.md").write_text(
+            render_escalation(escalation, spec, task), encoding="utf-8"
+        )
+        return run
+    _write_model(run_dir / "run.json", run)
+    return run
 
 
 def _run_stages(
