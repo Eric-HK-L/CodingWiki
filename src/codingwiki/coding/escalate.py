@@ -35,6 +35,9 @@ _STOP_REASONS: dict[CodingStopReason, EscalationReason] = {
     CodingStopReason.VERIFY_REJECTED: EscalationReason.VERIFIER_REJECTED,
     CodingStopReason.NO_PROGRESS: EscalationReason.NO_PROGRESS,
     CodingStopReason.ROUNDS_EXHAUSTED: EscalationReason.ROUNDS_EXHAUSTED,
+    CodingStopReason.TIME_EXCEEDED: EscalationReason.BUDGET_EXCEEDED,
+    CodingStopReason.TOKEN_EXCEEDED: EscalationReason.BUDGET_EXCEEDED,
+    CodingStopReason.DIFF_GROWING: EscalationReason.DIFF_GROWING,
 }
 
 _DECISIONS: dict[EscalationReason, tuple[str, ...]] = {
@@ -70,6 +73,15 @@ _DECISIONS: dict[EscalationReason, tuple[str, ...]] = {
     EscalationReason.VERIFIER_REJECTED: (
         "判断验证问题是否成立",
         "决定人工修改、调整验证器规则或重新拆任务",
+    ),
+    EscalationReason.BUDGET_EXCEEDED: (
+        "确认耗时/词元预算是否合理",
+        "决定缩小任务、拆分还是提高预算",
+        "决定人工完成剩余部分",
+    ),
+    EscalationReason.DIFF_GROWING: (
+        "判断模型是否在反复重写而非收敛",
+        "决定重新规划任务还是人工接管",
     ),
 }
 
@@ -113,6 +125,16 @@ _STEPS: dict[EscalationReason, tuple[str, ...]] = {
         "逐条核对 verification.json 的 blocker 与证据",
         "问题成立则人工修复后复验",
         "问题不成立则调整验证规则并重跑",
+    ),
+    EscalationReason.BUDGET_EXCEEDED: (
+        "查看 report.json 的耗时与词元统计",
+        "缩小任务或提高预算后重跑",
+        "保留工作区以便人工接续",
+    ),
+    EscalationReason.DIFF_GROWING: (
+        "对比相邻轮次 check.json 的 diff 规模",
+        "回滚工作区并按更小任务重试",
+        "若属正常增量，调高 diff-growth-rounds",
     ),
 }
 

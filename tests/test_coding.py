@@ -49,6 +49,7 @@ from codingwiki.domain.coding import (
     EscalationReason,
     EscalationReport,
     ReplayStatus,
+    RunLimits,
     RunMetrics,
     RunReport,
     StageKind,
@@ -788,6 +789,7 @@ def _run_with_runner(
     *,
     max_rounds: int = 5,
     body: str = SUCCESS_BACKEND,
+    limits: RunLimits | None = None,
 ) -> tuple[CodingRun, Path]:
     repo, manager, worktree, spec, task = _setup(env)
     script = _script(tmp_path, body)
@@ -800,6 +802,7 @@ def _run_with_runner(
         _config(script),
         max_rounds=max_rounds,
         runner=runner,
+        limits=limits,
     )
     return run, worktree
 
@@ -2189,3 +2192,84 @@ def test_run_task_junit_bad_xml_falls_back_to_log(env: CodingEnv, tmp_path: Path
     report = _report_of(env, run.run_id)
     assert not report.metrics.tests_parsed
     assert report.metrics.regression
+
+
+# ---------------------------------------------------------------- S27 预算
+
+
+SLOW_BACKEND = SUCCESS_BACKEND.replace(
+    'print("backend ok")', 'import time\ntime.sleep(1.2)\nprint("backend ok")'
+)
+BUDGET_TOKEN_BACKEND = SUCCESS_BACKEND.replace(
+    '"status": "ok", "summary": "done"',
+    '"status": "ok", "tokens_in": 90, "tokens_out": 60',
+)
+
+
+def test_run_task_time_budget_stops(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner([_result(), _result(CommandStatus.FAILED, stderr=GCC_ERROR)])
+
+    run, _worktree = _run_with_runner(
+        env,
+        tmp_path,
+        runner,
+        max_rounds=3,
+        body=SLOW_BACKEND,
+        limits=RunLimits(max_duration_s=1),
+    )
+
+    assert run.stop_reason is CodingStopReason.TIME_EXCEEDED
+    assert run.rounds == 1
+    assert run.limits.max_duration_s == 1
+    assert "预算耗尽" in run.message
+    report = _report_of(env, run.run_id)
+    assert report.metrics.budget_exceeded
+    assert not report.metrics.diff_growing
+
+
+def test_run_task_token_budget_stops(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner([_result(), _result(CommandStatus.FAILED, stderr=GCC_ERROR)])
+
+    run, _worktree = _run_with_runner(
+        env,
+        tmp_path,
+        runner,
+        max_rounds=3,
+        body=BUDGET_TOKEN_BACKEND,
+        limits=RunLimits(max_tokens=100),
+    )
+
+    assert run.stop_reason is CodingStopReason.TOKEN_EXCEEDED
+    assert run.rounds == 1
+    assert "tokens 150 / 100" in run.message
+    report = _report_of(env, run.run_id)
+    assert report.metrics.budget_exceeded
+
+
+def test_run_task_diff_growth_stops(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner(
+        [
+            _result(),
+            _result(CommandStatus.FAILED, stderr="probe A\n"),
+            _result(CommandStatus.FAILED, stderr="probe B\n"),
+            _result(CommandStatus.FAILED, stderr="probe C\n"),
+        ]
+    )
+
+    run, _worktree = _run_with_runner(
+        env,
+        tmp_path,
+        runner,
+        max_rounds=5,
+        limits=RunLimits(diff_growth_rounds=2),
+    )
+
+    assert run.stop_reason is CodingStopReason.DIFF_GROWING
+    assert run.rounds == 3
+    assert "连续 2 轮 diff 行数增长" in run.message
+    report = _report_of(env, run.run_id)
+    assert report.metrics.diff_growing
+    assert not report.metrics.budget_exceeded

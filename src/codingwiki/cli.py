@@ -45,6 +45,13 @@ from codingwiki.providers import create_provider
 from codingwiki.snapshot import FilesystemSnapshotStore
 
 
+def _non_negative(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("必须是非负整数")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codingwiki",
@@ -460,6 +467,18 @@ def build_parser() -> argparse.ArgumentParser:
     coding_run_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
     coding_run_parser.add_argument(
         "--max-rounds", type=int, default=5, help="最大修复轮次（默认 5）"
+    )
+    coding_run_parser.add_argument(
+        "--max-duration-s", type=_non_negative, default=0, help="已计量命令耗时预算（秒）；0=不限"
+    )
+    coding_run_parser.add_argument(
+        "--max-tokens", type=_non_negative, default=0, help="后端自报词元预算；0=不限"
+    )
+    coding_run_parser.add_argument(
+        "--diff-growth-rounds",
+        type=_non_negative,
+        default=2,
+        help="连续 diff 行数增长多少轮后停止；0=关闭（默认 2）",
     )
     coding_run_parser.set_defaults(handler=_cmd_coding_run)
 
@@ -1380,7 +1399,7 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
     from codingwiki.coding import load_approved_spec, load_backend_config, run_task
     from codingwiki.coding.audit import audit_count
     from codingwiki.coding.metrics import metrics_of, render_metrics
-    from codingwiki.domain.coding import CodingRunStatus, EscalationReport
+    from codingwiki.domain.coding import CodingRunStatus, EscalationReport, RunLimits
     from codingwiki.patch import WorkspaceManager
     from codingwiki.patch.protocol import WorktreeGit
 
@@ -1400,6 +1419,11 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
         config,
         max_rounds=args.max_rounds,
         verifier=verifier,
+        limits=RunLimits(
+            max_duration_s=args.max_duration_s,
+            max_tokens=args.max_tokens,
+            diff_growth_rounds=args.diff_growth_rounds,
+        ),
     )
 
     run_path = (
@@ -1443,6 +1467,13 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
         )
     for failure in [entry for entry in run.errors if entry.code.startswith("test:")][:5]:
         print(f"失败测试: {failure.code[len('test:') :]} {failure.message[:120]}")
+    if run.limits.has_budget:
+        duration_cap = f"{run.limits.max_duration_s}s" if run.limits.max_duration_s else "∞"
+        token_cap = str(run.limits.max_tokens) if run.limits.max_tokens else "∞"
+        print(
+            f"预算: 耗时={metrics.total_duration_ms / 1000:.1f}s/{duration_cap} "
+            f"tokens={metrics.tokens_in + metrics.tokens_out}/{token_cap}"
+        )
     if run.escalation_path:
         escalation = EscalationReport.model_validate_json(
             Path(run.escalation_path).read_text(encoding="utf-8")

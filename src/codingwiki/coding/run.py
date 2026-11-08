@@ -19,7 +19,7 @@ from codingwiki.coding.commands import stage_specs
 from codingwiki.coding.errors import parse_failures, timeout_failure
 from codingwiki.coding.escalate import build_escalation, render_escalation
 from codingwiki.coding.junit import JUnitConfig, load_config, parse_reports
-from codingwiki.coding.metrics import run_report
+from codingwiki.coding.metrics import run_report, tokens_of_result
 from codingwiki.coding.packet import build_packet
 from codingwiki.coding.verify import verify_patch
 from codingwiki.domain.coding import (
@@ -32,6 +32,7 @@ from codingwiki.domain.coding import (
     CodingStopReason,
     FailureItem,
     RoundReport,
+    RunLimits,
     StageKind,
     StageReport,
     StageStatus,
@@ -86,9 +87,14 @@ def run_task(
     max_rounds: int = 5,
     verifier: BackendConfig | None = None,
     runner: CommandRunner | None = None,
+    limits: RunLimits | None = None,
     now: datetime | None = None,
 ) -> CodingRun:
-    """基线 → 多轮编码 →（可选）独立验证；成功保留工作区，失败保留证据，不自动回滚。"""
+    """基线 → 多轮编码 →（可选）独立验证；成功保留工作区，失败保留证据，不自动回滚。
+
+    预算按已计量命令耗时与后端自报词元累计；连续 diff 增长达到阈值也停止。
+    """
+    limits = limits or RunLimits()
     if max_rounds < 1:
         raise InputError(f"max_rounds 必须 ≥1（实际 {max_rounds}）")
     if task.spec_id != spec.spec_id:
@@ -124,6 +130,8 @@ def run_task(
     runner = AuditRunner(runner or LocalCommandRunner(), sink)
 
     baseline = run_stages(pairs, runner, junit=junit)
+    used_ms = sum(item.duration_ms for item in baseline)
+    used_tokens = 0
     baseline_errors = _errors_of(baseline)
     if baseline_errors:
         _write_models(run_dir / "baseline" / "stages.json", baseline)
@@ -141,6 +149,7 @@ def run_task(
             max_rounds=max_rounds,
             baseline=baseline,
             message=_baseline_message(baseline),
+            limits=limits,
             now=now,
             audit_path=str(audit_path),
         )
@@ -155,6 +164,8 @@ def run_task(
     final_verifier: VerifierReport | None = None
     packet_dir = ""
     previous_keys: set[tuple[str, str, int, str]] | None = None
+    previous_diff: int | None = None
+    growth_streak = 0
 
     for index in range(1, max_rounds + 1):
         round_dir = run_dir / f"round-{index}"
@@ -184,6 +195,12 @@ def run_task(
         _write_model(round_dir / "check.json", guard)
         _write_model(run_dir / "check.json", guard)
         final_backend, final_guard = backend, guard
+        diff_lines = guard.stats.total_lines
+        if previous_diff is not None and diff_lines > previous_diff:
+            growth_streak += 1
+        elif previous_diff is not None:
+            growth_streak = 0
+        previous_diff = diff_lines
         stages: list[StageReport] = []
         round_errors: list[FailureItem] = []
         round_verifier: VerifierReport | None = None
@@ -255,6 +272,23 @@ def run_task(
                     stop_message = f"{max_rounds} 轮后仍有 {len(errors)} 项失败"
                 previous_keys = keys
 
+        token_in, token_out = tokens_of_result(backend)
+        used_ms += backend.duration_ms + sum(item.duration_ms for item in stages)
+        used_tokens += token_in + token_out
+        if stop is not CodingStopReason.SUCCEEDED:
+            budget_reason = _budget_stop(limits, used_ms, used_tokens)
+            if budget_reason is not None:
+                stop = budget_reason
+                stop_message = _budget_message(limits, used_ms, used_tokens)
+                round_message = f"{round_message}；{stop_message}".lstrip("；")
+            elif limits.diff_growth_rounds and growth_streak >= limits.diff_growth_rounds:
+                stop = CodingStopReason.DIFF_GROWING
+                stop_message = (
+                    f"连续 {growth_streak} 轮 diff 行数增长（当前 {diff_lines} 行），"
+                    "停止并要求重新规划"
+                )
+                round_message = f"{round_message}；{stop_message}".lstrip("；")
+
         reports.append(
             RoundReport(
                 index=index,
@@ -292,6 +326,7 @@ def run_task(
         errors=reports[-1].errors if reports else [],
         verifier=final_verifier,
         round_reports=reports,
+        limits=limits,
         message=stop_message,
         now=now,
         audit_path=str(audit_path),
@@ -320,6 +355,7 @@ def _build_run(
     errors: list[FailureItem] | None = None,
     verifier: VerifierReport | None = None,
     round_reports: list[RoundReport] | None = None,
+    limits: RunLimits | None = None,
     audit_path: str = "",
     now: datetime | None = None,
 ) -> CodingRun:
@@ -343,6 +379,7 @@ def _build_run(
         errors=errors or [],
         verifier=verifier,
         round_reports=round_reports or [],
+        limits=limits or RunLimits(),
         message=message,
         created_at=now or datetime.now(UTC),
     )
@@ -455,6 +492,20 @@ def _skipped_failures(stage: StageReport) -> list[FailureItem]:
         FailureItem(stage=stage.kind, code="test.skipped", message=f"测试被跳过：{ident}")
         for ident in stage.test_skipped
     ]
+
+
+def _budget_stop(limits: RunLimits, used_ms: int, used_tokens: int) -> CodingStopReason | None:
+    if limits.max_duration_s > 0 and used_ms >= limits.max_duration_s * 1000:
+        return CodingStopReason.TIME_EXCEEDED
+    if limits.max_tokens > 0 and used_tokens >= limits.max_tokens:
+        return CodingStopReason.TOKEN_EXCEEDED
+    return None
+
+
+def _budget_message(limits: RunLimits, used_ms: int, used_tokens: int) -> str:
+    if limits.max_duration_s > 0 and used_ms >= limits.max_duration_s * 1000:
+        return f"预算耗尽：已计量耗时 {used_ms / 1000:.1f}s / {limits.max_duration_s}s"
+    return f"预算耗尽：后端自报 tokens {used_tokens} / {limits.max_tokens}"
 
 
 def _baseline_message(baseline: list[StageReport]) -> str:

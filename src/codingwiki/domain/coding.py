@@ -41,6 +41,24 @@ class CodingStopReason(StrEnum):
     VERIFY_REJECTED = "verify_rejected"
     ROUNDS_EXHAUSTED = "rounds_exhausted"
     NO_PROGRESS = "no_progress"
+    TIME_EXCEEDED = "time_exceeded"
+    TOKEN_EXCEEDED = "token_exceeded"
+    DIFF_GROWING = "diff_growing"
+
+
+class RunLimits(_WikiModel):
+    """修复循环预算（计划 14.5.5）。0 表示该项不限制。
+
+    预算按编排器已计量的命令耗时与后端自报词元累计，不估算未计量部分。
+    """
+
+    max_duration_s: int = Field(default=0, ge=0, le=86_400)
+    max_tokens: int = Field(default=0, ge=0)
+    diff_growth_rounds: int = Field(default=2, ge=0, le=10)
+
+    @property
+    def has_budget(self) -> bool:
+        return self.max_duration_s > 0 or self.max_tokens > 0
 
 
 class EscalationReason(StrEnum):
@@ -57,6 +75,8 @@ class EscalationReason(StrEnum):
     SECURITY_ALERT = "security_alert"
     NO_PROGRESS = "no_progress"
     ROUNDS_EXHAUSTED = "rounds_exhausted"
+    BUDGET_EXCEEDED = "budget_exceeded"
+    DIFF_GROWING = "diff_growing"
     VERIFIER_REJECTED = "verifier_rejected"
 
 
@@ -375,6 +395,8 @@ class RunMetrics(_WikiModel):
     skipped_tests: int = Field(default=0, ge=0)
     guard_rejected: bool = False
     verifier_rejected: bool = False
+    budget_exceeded: bool = False
+    diff_growing: bool = False
     regression: bool = False
     escalated: bool = False
 
@@ -443,6 +465,7 @@ class CodingRun(_WikiModel):
     errors: list[FailureItem] = Field(default_factory=list)
     verifier: VerifierReport | None = None
     round_reports: list[RoundReport] = Field(default_factory=list)
+    limits: RunLimits = Field(default_factory=RunLimits)
     message: str = ""
     created_at: datetime
 
@@ -466,6 +489,7 @@ __all__ = [
     "ReplayReport",
     "ReplayStatus",
     "RoundReport",
+    "RunLimits",
     "RunMetrics",
     "RunReport",
     "StageKind",
