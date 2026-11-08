@@ -15,11 +15,21 @@ from codingwiki.errors import InputError
 from codingwiki.exec.protocol import CommandSpec
 
 
-def stage_specs(repo: RepoConfig, *, workspace_root: Path) -> list[tuple[StageKind, CommandSpec]]:
-    """按 configure → lint → compile → test-fast → test-full 生成非空阶段。"""
+def stage_specs(
+    repo: RepoConfig,
+    *,
+    workspace_root: Path,
+    tmp_dir: Path | None = None,
+) -> list[tuple[StageKind, CommandSpec]]:
+    """按 configure → lint → compile → test-fast → test-full 生成非空阶段。
+
+    tmp_dir 传入时给每条命令注入 TMPDIR（运行级临时目录，结束后由编排器清理）；
+    CPU 上限取自 repo.resources。
+    """
     build = repo.commands.build
     test = repo.commands.test
     lint = repo.commands.lint
+    env = {"TMPDIR": str(tmp_dir)} if tmp_dir is not None else {}
     entries = [
         (StageKind.CONFIGURE, build.configure, build.timeout_s),
         (StageKind.LINT, lint.command, lint.timeout_s),
@@ -38,7 +48,9 @@ def stage_specs(repo: RepoConfig, *, workspace_root: Path) -> list[tuple[StageKi
                     argv=split_command(text),
                     cwd=str(workspace_root),
                     timeout_s=timeout_s,
+                    env=dict(env),
                     label=kind.value,
+                    cpu_seconds=repo.resources.cpu_seconds,
                 ),
             )
         )

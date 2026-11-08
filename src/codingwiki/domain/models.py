@@ -82,6 +82,16 @@ class LintCommands(_DomainModel):
     timeout_s: int = Field(default=600, ge=1, le=86_400)
 
 
+class ResourceLimits(_DomainModel):
+    """单条命令可自证的资源上限（开发计划 14.7.4 编排侧切片）。
+
+    cpu_seconds 由 RLIMIT_CPU 在 POSIX 上硬限，超限进程收到 SIGXCPU；
+    0 表示不限制。内存/GPU/构建缓存依赖容器或 cgroup，不在此承诺。
+    """
+
+    cpu_seconds: int = Field(default=0, ge=0, le=86_400)
+
+
 class RepoCommands(_DomainModel):
     """仓库级命令配置：configure/compile/test/lint 由编排器执行（14.3 硬边界：
     模型只改文件，不跑命令）。命令是 shell 字符串形态，落 CommandSpec 时由调用方
@@ -109,6 +119,7 @@ class RepoConfig(_DomainModel):
     binary_extensions: list[str] = Field(default_factory=list)
     generate_file_exclusion_defaults: bool = True
     commands: RepoCommands = Field(default_factory=RepoCommands)
+    resources: ResourceLimits = Field(default_factory=ResourceLimits)
 
     @field_validator("url")
     @classmethod
@@ -214,6 +225,7 @@ __all__ = [
     "RepoConfig",
     "RepoMetadata",
     "RepoType",
+    "ResourceLimits",
     "Snapshot",
     "TestCommands",
 ]

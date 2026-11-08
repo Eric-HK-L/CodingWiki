@@ -33,6 +33,7 @@ class CommandSpec(_ExecModel):
     env: dict[str, str] = Field(default_factory=dict)  # 叠加在进程环境之上
     artifacts: list[str] = Field(default_factory=list)  # 期望产物（相对 cwd）
     label: str = ""  # 审计用标签；不影响执行
+    cpu_seconds: int = Field(default=0, ge=0, le=86_400)  # 0 表示不限制（RLIMIT_CPU）
 
     @field_validator("argv")
     @classmethod

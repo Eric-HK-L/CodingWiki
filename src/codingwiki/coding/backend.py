@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +17,7 @@ import yaml
 from codingwiki.coding.audit import AuditSink
 from codingwiki.domain.coding import BackendConfig, BackendResult, BackendStatus, TaskPacket
 from codingwiki.errors import InputError
+from codingwiki.exec.local import run_process
 
 _TAIL_CHARS = 4000
 
@@ -82,28 +81,22 @@ def run_command_backend(
     result_path.parent.mkdir(parents=True, exist_ok=True)
 
     started_at = datetime.now(UTC)
-    started = time.monotonic()
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(workspace.resolve()),
-            check=False,
-            capture_output=True,
-            timeout=config.timeout_seconds,
-        )
-        duration_ms = int((time.monotonic() - started) * 1000)
-        stdout = completed.stdout.decode("utf-8", errors="replace")
-        stderr = completed.stderr.decode("utf-8", errors="replace")
-        status = BackendStatus.OK if completed.returncode == 0 else BackendStatus.FAILED
-        exit_code = completed.returncode
-        error = ""
-    except subprocess.TimeoutExpired as exc:
-        duration_ms = int((time.monotonic() - started) * 1000)
-        stdout = _decode(exc.stdout)
-        stderr = _decode(exc.stderr)
+    outcome = run_process(
+        argv,
+        cwd=workspace.resolve(),
+        timeout_s=config.timeout_seconds,
+    )
+    duration_ms = outcome.duration_ms
+    stdout = _decode(outcome.stdout)
+    stderr = _decode(outcome.stderr)
+    if outcome.timed_out:
         status = BackendStatus.TIMEOUT
         exit_code = -1
         error = f"后端超时（>{config.timeout_seconds}s）"
+    else:
+        status = BackendStatus.OK if outcome.exit_code == 0 else BackendStatus.FAILED
+        exit_code = outcome.exit_code
+        error = ""
 
     result_json, parse_error = _read_result(result_path)
     if parse_error:
