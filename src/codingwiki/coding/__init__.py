@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from codingwiki.coding.audit import AuditRunner, AuditSink, assert_command_allowed, audit_count
 from codingwiki.coding.backend import load_backend_config, run_backend
+from codingwiki.coding.delivery import build_delivery, render_delivery, render_pull_request
 from codingwiki.coding.escalate import build_escalation, escalation_reason, render_escalation
 from codingwiki.coding.packet import build_packet
 from codingwiki.coding.replay import replay_run
@@ -17,13 +18,16 @@ __all__ = [
     "assert_command_allowed",
     "audit_count",
     "build_escalation",
+    "build_delivery",
     "build_packet",
     "decompose",
     "escalation_reason",
     "load_approved_spec",
     "load_backend_config",
     "mechanical_report",
+    "render_delivery",
     "render_escalation",
+    "render_pull_request",
     "replay_run",
     "run_backend",
     "run_task",

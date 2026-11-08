@@ -1485,6 +1485,8 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
         print(f"升级摘要: {escalation.summary}")
         for decision in escalation.decisions[:3]:
             print(f"待决定: {decision}")
+    if run.delivery_path:
+        print(f"交付: {run.delivery_path}（patch.diff / delivery.md / pr.md）")
     if run.audit_path:
         print(f"审计: {run.audit_path}（{audit_count(run.audit_path)} 条）")
     print(f"结果: {run_path}")

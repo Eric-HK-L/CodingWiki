@@ -463,6 +463,7 @@ class CodingRun(_WikiModel):
     max_rounds: int = Field(default=1, ge=1)
     packet_dir: str = ""
     escalation_path: str = ""
+    delivery_path: str = ""
     audit_path: str = ""
     backend: BackendResult | None = None
     guard: PatchReport | None = None
@@ -477,6 +478,28 @@ class CodingRun(_WikiModel):
     created_at: datetime
 
 
+class DeliveryBundle(_WikiModel):
+    """一次成功运行的交付包（delivery.json，开发计划 14.5.7）。
+
+    只生成材料（补丁、变更说明、测试摘要、PR 草稿），不自动提交、推送或创建合并请求。
+    """
+
+    run_id: str = Field(pattern=r"^RUN-[A-Za-z0-9._-]+$")
+    repo_id: str = Field(min_length=1)
+    spec_id: str = Field(pattern=r"^F-\d{3}$")
+    task_id: str = Field(pattern=r"^T-\d{3}$")
+    branch: str = Field(min_length=1)
+    base_revision: str = Field(min_length=1)
+    status: CodingRunStatus
+    stop_reason: CodingStopReason
+    title: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    files: list[str] = Field(default_factory=list)
+    metrics: RunMetrics
+    patch_path: str = Field(min_length=1)
+    created_at: datetime
+
+
 __all__ = [
     "BackendConfig",
     "BackendResult",
@@ -488,6 +511,7 @@ __all__ = [
     "CodingStopReason",
     "CommandAuditEntry",
     "ContextFile",
+    "DeliveryBundle",
     "EscalationFailure",
     "EscalationReason",
     "EscalationReport",

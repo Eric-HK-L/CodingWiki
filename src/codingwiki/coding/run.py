@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from codingwiki.coding.audit import AuditRunner, AuditSink, assert_command_allowed
 from codingwiki.coding.backend import run_backend
 from codingwiki.coding.commands import stage_specs
+from codingwiki.coding.delivery import build_delivery
 from codingwiki.coding.errors import parse_failures, timeout_failure
 from codingwiki.coding.escalate import build_escalation, render_escalation
 from codingwiki.coding.junit import JUnitConfig, load_config, parse_reports
@@ -353,6 +354,9 @@ def run_task(
         now=now,
         audit_path=str(audit_path),
     )
+    if run.status is CodingRunStatus.SUCCEEDED:
+        build_delivery(provider, run, spec, task, record, run_dir, now=now)
+        run = run.model_copy(update={"delivery_path": str(run_dir / "delivery")})
     return _finish_run(run_dir, run, spec, task, now=now)
 
 
