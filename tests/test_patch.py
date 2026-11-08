@@ -290,6 +290,58 @@ def test_todo_is_warning_not_blocker(env: PatchEnv) -> None:
     assert len(report.warnings) >= 1
 
 
+def test_network_call_is_warning_not_blocker(env: PatchEnv) -> None:
+    _repo_obj, manager, worktree = _open(env)
+    _write(worktree / "nvlog/src/nvlog.c", NVLOG_C + "// curl https://example.com/api\n")
+    report = _check(env, manager, PatchPolicy(allowed_paths=["nvlog/src/nvlog.c"]))
+    assert "diff.network_call" in _codes(report)
+    assert report.verdict is PatchVerdict.PASS
+    assert len(report.warnings) >= 1
+
+
+def test_dangerous_command_blocked(env: PatchEnv) -> None:
+    _repo_obj, manager, worktree = _open(env)
+    _write(worktree / "nvlog/src/nvlog.c", NVLOG_C + 'os.system("rm -rf /tmp/x");\n')
+    report = _check(env, manager, PatchPolicy(allowed_paths=["nvlog/src/nvlog.c"]))
+    assert "diff.dangerous_call" in _codes(report)
+    assert report.verdict is PatchVerdict.FAIL
+
+
+def test_eval_is_warning_not_blocker(env: PatchEnv) -> None:
+    _repo_obj, manager, worktree = _open(env)
+    _write(worktree / "nvlog/src/nvlog.c", NVLOG_C + "auto value = eval(expr);\n")
+    report = _check(env, manager, PatchPolicy(allowed_paths=["nvlog/src/nvlog.c"]))
+    assert "diff.dangerous_call" in _codes(report)
+    assert report.verdict is PatchVerdict.PASS
+
+
+def test_source_only_change_warns_test_first(env: PatchEnv) -> None:
+    _repo_obj, manager, worktree = _open(env)
+    _write(worktree / "nvlog/src/nvlog.c", NVLOG_C + "int level = 1;\n")
+    report = _check(env, manager, PatchPolicy(allowed_paths=["nvlog/src/nvlog.c"]))
+    assert "test.first_missing" in _codes(report)
+    assert report.verdict is PatchVerdict.PASS
+
+
+def test_test_change_satisfies_test_first(env: PatchEnv) -> None:
+    _repo_obj, manager, worktree = _open(env)
+    _write(worktree / "nvlog/src/nvlog.c", NVLOG_C + "int level = 1;\n")
+    _write(worktree / "nvlog/tests/test_nvlog.c", TEST_C + "// extra coverage\n")
+    report = _check(env, manager, PatchPolicy(allowed_paths=["nvlog/src/nvlog.c"]))
+    assert "test.first_missing" not in _codes(report)
+
+
+def test_test_first_warning_can_be_disabled(env: PatchEnv) -> None:
+    _repo_obj, manager, worktree = _open(env)
+    _write(worktree / "nvlog/src/nvlog.c", NVLOG_C + "int level = 1;\n")
+    report = _check(
+        env,
+        manager,
+        PatchPolicy(allowed_paths=["nvlog/src/nvlog.c"], require_test_first=False),
+    )
+    assert "test.first_missing" not in _codes(report)
+
+
 def test_generated_header_blocked(env: PatchEnv) -> None:
     _repo_obj, manager, worktree = _open(env)
     _write(
@@ -399,7 +451,7 @@ def test_cli_open_check_rollback_close(
     payload = json.loads(stdout)
     assert rc == 0
     assert payload["verdict"] == "pass"
-    assert payload["findings"] == []
+    assert [item["code"] for item in payload["findings"]] == ["test.first_missing"]
 
     _write(worktree / "src/cuphy/CMakeLists.txt", CMAKE + "add_dependencies(x y)\n")
     assert main(["patch", "check", "--task", "T-001", "--spec-dir", str(spec_dir), *common]) == 3

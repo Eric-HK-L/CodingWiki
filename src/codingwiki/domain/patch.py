@@ -92,6 +92,7 @@ class PatchPolicy(_WikiModel):
     allow_generated: bool = False
     max_commented_lines: int = Field(default=15, ge=1, le=1000)
     todo_blocker: bool = False
+    require_test_first: bool = True
 
     @field_validator("allowed_paths")
     @classmethod

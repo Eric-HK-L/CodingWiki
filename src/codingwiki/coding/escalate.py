@@ -63,6 +63,11 @@ _DECISIONS: dict[EscalationReason, tuple[str, ...]] = {
         "人工审计命中的密钥/安全规则",
         "确认是否需要吊销凭据或清理工作区",
     ),
+    EscalationReason.UNSAFE_CHANGE: (
+        "人工审计命中的危险调用",
+        "确认该调用是否为任务必需",
+        "决定要求模型改写、调整策略还是人工实现",
+    ),
     EscalationReason.NO_PROGRESS: (
         "判断重复错误是任务拆分问题还是模型能力问题",
         "决定人工修复、重新拆分或更换后端",
@@ -116,6 +121,11 @@ _STEPS: dict[EscalationReason, tuple[str, ...]] = {
         "按安全流程处理凭据",
         "确认无风险后再决定回滚或继续",
     ),
+    EscalationReason.UNSAFE_CHANGE: (
+        "查看 check.json 中 diff.dangerous_call 的具体行",
+        "要求模型移除危险调用或改用受控 API",
+        "若任务确需该能力，调整任务/策略后重新评审",
+    ),
     EscalationReason.NO_PROGRESS: (
         "对照 errors.json 分析重复根因",
         "补充任务包上下文或拆分任务",
@@ -163,6 +173,8 @@ def escalation_reason(run: CodingRun, spec: SpecDocument) -> EscalationReason:
         codes |= {item.code for item in _verifier_blockers(run)}
         if any(hint in code for code in codes for hint in _SECURITY_HINTS):
             return EscalationReason.SECURITY_ALERT
+        if any(code == "diff.dangerous_call" for code in codes):
+            return EscalationReason.UNSAFE_CHANGE
     return _STOP_REASONS[run.stop_reason]
 
 
@@ -315,6 +327,12 @@ def _decisions(reason: EscalationReason, run: CodingRun, spec: SpecDocument) -> 
         codes += sorted({item.code for item in _verifier_blockers(run)})
         if codes:
             items.append("人工审计命中的规则：" + ", ".join(codes))
+    elif reason is EscalationReason.UNSAFE_CHANGE:
+        codes = sorted(
+            {item.code for item in _guard_blockers(run) if item.code == "diff.dangerous_call"}
+        )
+        if codes:
+            items.append("危险调用规则：" + ", ".join(codes))
     elif reason is EscalationReason.REQUIREMENT_DECISION:
         open_ids = [item.id for item in spec.questions if item.status is QuestionStatus.OPEN]
         if open_ids:

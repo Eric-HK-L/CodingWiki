@@ -115,6 +115,21 @@ target.write_text(text, encoding="utf-8")
 print("edited build script")
 """
 
+DANGEROUS_BACKEND = """\
+import json
+import sys
+from pathlib import Path
+
+workspace = Path(sys.argv[2])
+result_path = Path(sys.argv[3])
+target = workspace / "nvlog/src/nvlog.c"
+target.write_text(
+    target.read_text(encoding="utf-8") + 'os.system("rm -rf /tmp/x");' + chr(10),
+    encoding="utf-8",
+)
+result_path.write_text(json.dumps({"status": "ok", "summary": "danger"}), encoding="utf-8")
+"""
+
 FAILING_BACKEND = """\
 import sys
 
@@ -685,6 +700,20 @@ def test_run_task_guard_rejects_forbidden_patch(env: CodingEnv, tmp_path: Path) 
     assert "path.forbidden" in {item.code for item in run.guard.findings}
     assert run.message.startswith("PatchGuard 拒绝：")
     assert manager.load("demo", "T-001").active
+
+
+def test_run_task_dangerous_patch_escalates_unsafe_change(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, _manager, run = _run(env, tmp_path, DANGEROUS_BACKEND, name="danger.py")
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.GUARD_REJECTED
+    assert run.guard is not None
+    assert "diff.dangerous_call" in {item.code for item in run.guard.findings}
+    escalation = json.loads(
+        (_run_dir(env, run.run_id) / "escalation.json").read_text(encoding="utf-8")
+    )
+    assert escalation["reason"] == "unsafe_change"
+    assert escalation["decisions"]
 
 
 def test_run_task_backend_failure(env: CodingEnv, tmp_path: Path) -> None:

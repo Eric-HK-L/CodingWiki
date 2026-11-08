@@ -74,6 +74,7 @@ class EscalationReason(StrEnum):
     BACKEND_FAILED = "backend_failed"
     FORBIDDEN_FILE = "forbidden_file"
     SECURITY_ALERT = "security_alert"
+    UNSAFE_CHANGE = "unsafe_change"
     NO_PROGRESS = "no_progress"
     ROUNDS_EXHAUSTED = "rounds_exhausted"
     BUDGET_EXCEEDED = "budget_exceeded"
