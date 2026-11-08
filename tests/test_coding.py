@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import subprocess
 import sys
 from collections.abc import Generator
@@ -592,6 +593,30 @@ def test_run_task_success(env: CodingEnv, tmp_path: Path) -> None:
     assert (manager.home / "patches" / "demo" / "T-001" / "check.json").is_file()
 
 
+def test_run_task_isolates_tmp_dir_and_cleans_it(env: CodingEnv, tmp_path: Path) -> None:
+    probe = tmp_path / "probe_tmpdir.py"
+    probe.write_text(
+        "import os, sys\n"
+        "tmpdir = os.environ['TMPDIR']\n"
+        "open(sys.argv[1], 'w', encoding='utf-8').write(\n"
+        "    tmpdir + '|' + str(os.path.isdir(tmpdir)))\n",
+        encoding="utf-8",
+    )
+    observed_path = tmp_path / "observed-tmpdir.txt"
+    command = " ".join(
+        shlex.quote(item) for item in (sys.executable, str(probe), str(observed_path))
+    )
+    _with_commands(env, f'commands:\n  build:\n    compile: "{command}"\n')
+
+    _repo_obj, manager, run = _run(env, tmp_path, SUCCESS_BACKEND)
+
+    run_dir = _run_dir(env, run.run_id)
+    observed = observed_path.read_text(encoding="utf-8").split("|")
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert observed == [str(run_dir / "tmp"), "True"]
+    assert not (run_dir / "tmp").exists()
+
+
 def test_run_task_success_generates_delivery(env: CodingEnv, tmp_path: Path) -> None:
     _repo_obj, manager, run = _run(env, tmp_path, SUCCESS_BACKEND)
     delivery_dir = _run_dir(env, run.run_id) / "delivery"
@@ -898,13 +923,15 @@ def test_stage_specs_order_cwd_and_timeouts(tmp_path: Path) -> None:
         "commands:\n"
         '  build: {configure: "cfg-cmd", compile: "build-cmd", timeout_s: 120}\n'
         '  lint: {command: "lint-cmd", timeout_s: 30}\n'
-        '  test: {fast: "fast-cmd", full: "full-cmd", timeout_s: 900}\n',
+        '  test: {fast: "fast-cmd", full: "full-cmd", timeout_s: 900}\n'
+        "resources: {cpu_seconds: 90}\n",
         encoding="utf-8",
     )
     repo = load_repo_config(config_dir / "demo.yaml")
     root = tmp_path / "ws"
+    tmp_dir = tmp_path / "run-tmp"
 
-    pairs = stage_specs(repo, workspace_root=root)
+    pairs = stage_specs(repo, workspace_root=root, tmp_dir=tmp_dir)
 
     assert [kind for kind, _spec in pairs] == [
         StageKind.CONFIGURE,
@@ -917,6 +944,21 @@ def test_stage_specs_order_cwd_and_timeouts(tmp_path: Path) -> None:
     assert pairs[0][1].timeout_s == 120
     assert pairs[1][1].timeout_s == 30
     assert pairs[3][1].timeout_s == 900
+    assert all(spec.cpu_seconds == 90 for _kind, spec in pairs)
+    assert all(spec.env == {"TMPDIR": str(tmp_dir)} for _kind, spec in pairs)
+
+    # 不传 tmp_dir 时命令不带 TMPDIR，CPU 上限仍按仓库配置生效
+    plain = stage_specs(repo, workspace_root=root)
+    assert plain[0][1].env == {}
+    assert plain[0][1].cpu_seconds == 90
+
+
+def test_resource_limits_validation() -> None:
+    from codingwiki.domain.models import ResourceLimits
+
+    assert ResourceLimits().cpu_seconds == 0
+    with pytest.raises(ValidationError):
+        ResourceLimits(cpu_seconds=-1)
 
 
 def test_parse_failures_gcc_diagnostic() -> None:

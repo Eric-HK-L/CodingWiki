@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -42,6 +45,50 @@ def test_run_timeout() -> None:
     )
     assert result.status is CommandStatus.TIMEOUT
     assert result.exit_code == -1
+
+
+def test_timeout_kills_grandchild_process_group(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(30)\n"
+    )
+
+    result = LocalCommandRunner().run(CommandSpec(argv=[_PY, "-c", script], timeout_s=1))
+
+    assert result.status is CommandStatus.TIMEOUT
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(pid)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_CPU 仅在 POSIX 可用")
+def test_cpu_limit_reports_timeout() -> None:
+    result = LocalCommandRunner().run(
+        CommandSpec(argv=[_PY, "-c", "while True: pass"], timeout_s=10, cpu_seconds=1)
+    )
+    assert result.status is CommandStatus.TIMEOUT
+    assert result.exit_code == -1
+
+
+def test_other_signal_termination_is_failed_not_timeout() -> None:
+    result = LocalCommandRunner().run(
+        CommandSpec(argv=[_PY, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"])
+    )
+    assert result.status is CommandStatus.FAILED
+    assert result.exit_code == -signal.SIGTERM
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def test_run_cwd_and_env() -> None:

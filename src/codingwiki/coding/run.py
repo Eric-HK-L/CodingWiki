@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -118,7 +119,8 @@ def run_task(
 
     policy = PatchPolicy(allowed_paths=task.files_allowed)
     source_root = workspace / record.root if record.root else workspace
-    pairs = stage_specs(repo, workspace_root=source_root)
+    tmp_dir = run_dir / "tmp"
+    pairs = stage_specs(repo, workspace_root=source_root, tmp_dir=tmp_dir)
     junit = load_config(repo.commands.test, source_root=source_root)
     for kind, stage_spec in pairs:
         assert_command_allowed(stage_spec.argv, source=f"阶段 {kind.value}")
@@ -127,6 +129,7 @@ def run_task(
         assert_command_allowed(verifier.command, source="验证后端")
 
     run_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     audit_path = run_dir / "audit" / "commands.jsonl"
     sink = AuditSink(audit_path)
     runner = AuditRunner(runner or LocalCommandRunner(), sink)
@@ -422,6 +425,7 @@ def _finish_run(
     now: datetime | None,
 ) -> CodingRun:
     """写 run.json 与 report.json；失败时追加 escalation.json/md。"""
+    shutil.rmtree(run_dir / "tmp", ignore_errors=True)
     if run.status is CodingRunStatus.FAILED:
         escalation_path = run_dir / "escalation.json"
         run = run.model_copy(update={"escalation_path": str(escalation_path)})
