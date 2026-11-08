@@ -44,6 +44,7 @@ class CodingStopReason(StrEnum):
     TIME_EXCEEDED = "time_exceeded"
     TOKEN_EXCEEDED = "token_exceeded"
     DIFF_GROWING = "diff_growing"
+    FLAKY_BASELINE = "flaky_baseline"
 
 
 class RunLimits(_WikiModel):
@@ -77,6 +78,7 @@ class EscalationReason(StrEnum):
     ROUNDS_EXHAUSTED = "rounds_exhausted"
     BUDGET_EXCEEDED = "budget_exceeded"
     DIFF_GROWING = "diff_growing"
+    FLAKY_TESTS = "flaky_tests"
     VERIFIER_REJECTED = "verifier_rejected"
 
 
@@ -130,6 +132,8 @@ class StageReport(_WikiModel):
     report_files: list[str] = Field(default_factory=list)
     test_failures: list[TestFailure] = Field(default_factory=list)
     test_skipped: list[str] = Field(default_factory=list)
+    flaky_tests: list[str] = Field(default_factory=list)
+    attempts: int = Field(default=1, ge=1, le=10)
     report_error: str = ""
 
     @property
@@ -393,6 +397,8 @@ class RunMetrics(_WikiModel):
     new_failures: int = Field(default=0, ge=0)
     pre_existing_failures: int = Field(default=0, ge=0)
     skipped_tests: int = Field(default=0, ge=0)
+    flaky_tests: int = Field(default=0, ge=0)
+    quarantined_tests: int = Field(default=0, ge=0)
     guard_rejected: bool = False
     verifier_rejected: bool = False
     budget_exceeded: bool = False
@@ -466,6 +472,7 @@ class CodingRun(_WikiModel):
     verifier: VerifierReport | None = None
     round_reports: list[RoundReport] = Field(default_factory=list)
     limits: RunLimits = Field(default_factory=RunLimits)
+    quarantined_tests: list[str] = Field(default_factory=list)
     message: str = ""
     created_at: datetime
 

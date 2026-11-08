@@ -9,6 +9,7 @@ import json
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -129,13 +130,21 @@ def run_task(
     sink = AuditSink(audit_path)
     runner = AuditRunner(runner or LocalCommandRunner(), sink)
 
-    baseline = run_stages(pairs, runner, junit=junit)
+    baseline = run_stages(pairs, runner, junit=junit, attempts=repo.commands.test.baseline_runs)
     used_ms = sum(item.duration_ms for item in baseline)
     used_tokens = 0
     baseline_errors = _errors_of(baseline)
-    if baseline_errors:
+    quarantined = _quarantined(baseline)
+    critical = _critical_flaky(quarantined, repo.commands.test.critical_tests)
+    if baseline_errors or critical:
         _write_models(run_dir / "baseline" / "stages.json", baseline)
         _write_models(run_dir / "baseline" / "errors.json", baseline_errors)
+        if critical:
+            stop_reason = CodingStopReason.FLAKY_BASELINE
+            message = _flaky_baseline_message(critical, quarantined)
+        else:
+            stop_reason = CodingStopReason.BASELINE_FAILED
+            message = _baseline_message(baseline)
         run = _build_run(
             run_id,
             repo,
@@ -144,12 +153,13 @@ def run_task(
             record,
             workspace,
             status=CodingRunStatus.FAILED,
-            stop_reason=CodingStopReason.BASELINE_FAILED,
+            stop_reason=stop_reason,
             rounds=0,
             max_rounds=max_rounds,
             baseline=baseline,
-            message=_baseline_message(baseline),
+            message=message,
             limits=limits,
+            quarantined_tests=quarantined,
             now=now,
             audit_path=str(audit_path),
         )
@@ -215,12 +225,19 @@ def run_task(
             stop_message = _guard_message(guard.findings)
             round_message = stop_message
         else:
-            stages = run_stages(pairs, runner, junit=junit)
+            stages = run_stages(
+                pairs,
+                runner,
+                junit=junit,
+                attempts=repo.commands.test.retries + 1,
+                retry_on_failure=True,
+            )
             _write_models(round_dir / "stages.json", stages)
             failed_stage = next(
                 (item for item in stages if item.status is not StageStatus.OK), None
             )
             skipped = sum(len(item.test_skipped) for item in stages)
+            round_flaky = sorted({ident for item in stages for ident in item.flaky_tests})
             if failed_stage is None and not skipped:
                 if verifier is not None:
                     verify_dir = round_dir / "verify"
@@ -251,6 +268,10 @@ def run_task(
                     stop_message = f"第 {index} 轮通过：{_stage_summary(stages)}"
                     if round_verifier is not None:
                         stop_message = f"{stop_message}，独立验证通过"
+                    if round_flaky:
+                        stop_message = (
+                            f"{stop_message}；不稳定测试 {len(round_flaky)} 项（重试后通过）"
+                        )
                     round_message = stop_message
             else:
                 round_errors = _errors_of(stages)
@@ -327,6 +348,7 @@ def run_task(
         verifier=final_verifier,
         round_reports=reports,
         limits=limits,
+        quarantined_tests=quarantined,
         message=stop_message,
         now=now,
         audit_path=str(audit_path),
@@ -356,6 +378,7 @@ def _build_run(
     verifier: VerifierReport | None = None,
     round_reports: list[RoundReport] | None = None,
     limits: RunLimits | None = None,
+    quarantined_tests: list[str] | None = None,
     audit_path: str = "",
     now: datetime | None = None,
 ) -> CodingRun:
@@ -380,6 +403,7 @@ def _build_run(
         verifier=verifier,
         round_reports=round_reports or [],
         limits=limits or RunLimits(),
+        quarantined_tests=quarantined_tests or [],
         message=message,
         created_at=now or datetime.now(UTC),
     )
@@ -415,39 +439,119 @@ def run_stages(
     runner: CommandRunner,
     *,
     junit: JUnitConfig | None = None,
+    attempts: int = 1,
+    retry_on_failure: bool = False,
 ) -> list[StageReport]:
     """顺序执行；首个失败即停（编译失败就不跑测试）。
 
-    测试阶段执行完按配置解析 JUnit 报告；只接受本轮新生成的报告文件。
+    测试阶段按 attempts 重复：基线用于识别不稳定用例（每次都跑）；
+    修复轮次只在用例失败时重跑（retry_on_failure），重跑后仍失败的才算失败。
+    每个测试阶段执行完按配置解析 JUnit 报告；只接受本轮新生成的报告文件。
     """
     reports: list[StageReport] = []
     for kind, spec in pairs:
-        started_ns = time.time_ns()
-        result = runner.run(spec)
-        report = StageReport(
-            kind=kind,
-            command=spec.argv,
-            status=StageStatus(result.status.value),
-            exit_code=result.exit_code,
-            duration_ms=result.duration_ms,
-            stdout_tail=result.stdout[-4000:],
-            stderr_tail=result.stderr[-4000:],
-            artifacts=result.artifacts,
-        )
-        if junit is not None and kind in _TEST_STAGES:
-            parsed = parse_reports(junit, since_ns=started_ns)
-            report = report.model_copy(
-                update={
-                    "report_files": parsed.files,
-                    "test_failures": parsed.failures,
-                    "test_skipped": parsed.skipped,
-                    "report_error": "; ".join(parsed.errors),
-                }
+        if kind in _TEST_STAGES and attempts > 1:
+            report = _run_test_stage(
+                kind,
+                spec,
+                runner,
+                junit,
+                attempts=attempts,
+                retry_on_failure=retry_on_failure,
             )
+        else:
+            report = _run_stage_once(kind, spec, runner, junit)
         reports.append(report)
         if report.status is not StageStatus.OK:
             break
     return reports
+
+
+def _run_stage_once(
+    kind: StageKind, spec: CommandSpec, runner: CommandRunner, junit: JUnitConfig | None
+) -> StageReport:
+    started_ns = time.time_ns()
+    result = runner.run(spec)
+    report = StageReport(
+        kind=kind,
+        command=spec.argv,
+        status=StageStatus(result.status.value),
+        exit_code=result.exit_code,
+        duration_ms=result.duration_ms,
+        stdout_tail=result.stdout[-4000:],
+        stderr_tail=result.stderr[-4000:],
+        artifacts=result.artifacts,
+    )
+    if junit is not None and kind in _TEST_STAGES:
+        parsed = parse_reports(junit, since_ns=started_ns)
+        report = report.model_copy(
+            update={
+                "report_files": parsed.files,
+                "test_failures": parsed.failures,
+                "test_skipped": parsed.skipped,
+                "report_error": "; ".join(parsed.errors),
+            }
+        )
+    return report
+
+
+def _run_test_stage(
+    kind: StageKind,
+    spec: CommandSpec,
+    runner: CommandRunner,
+    junit: JUnitConfig | None,
+    *,
+    attempts: int,
+    retry_on_failure: bool,
+) -> StageReport:
+    collected: list[StageReport] = []
+    for _index in range(attempts):
+        report = _run_stage_once(kind, spec, runner, junit)
+        collected.append(report)
+        if not retry_on_failure:
+            continue
+        if report.status is StageStatus.OK:
+            break
+        if not report.tests_parsed:
+            # 超时/报告缺失或坏 XML 重跑不会改变结论，保留证据即可。
+            break
+    return _combine_attempts(collected)
+
+
+def _combine_attempts(attempts: list[StageReport]) -> StageReport:
+    """合并同一测试命令的多次执行：只有每次都失败的用例才算真失败。"""
+    first = attempts[0]
+    if len(attempts) == 1:
+        return first
+    last = attempts[-1]
+    total_ms = sum(item.duration_ms for item in attempts)
+    parsed = [item for item in attempts if item.tests_parsed]
+    if len(parsed) != len(attempts):
+        status = (
+            StageStatus.OK
+            if any(item.status is StageStatus.OK for item in attempts)
+            else last.status
+        )
+        return last.model_copy(
+            update={"attempts": len(attempts), "duration_ms": total_ms, "status": status}
+        )
+    failure_sets = [{item.id for item in report.test_failures} for report in parsed]
+    persistent = set.intersection(*failure_sets)
+    flaky = sorted(set.union(*failure_sets) - persistent)
+    failures = [item for item in last.test_failures if item.id in persistent]
+    skipped = list(last.test_skipped)
+    rescued = not persistent and not skipped and last.status is not StageStatus.OK
+    status = StageStatus.OK if last.status is StageStatus.OK or rescued else last.status
+    return last.model_copy(
+        update={
+            "status": status,
+            "duration_ms": total_ms,
+            "test_failures": failures,
+            "test_skipped": skipped,
+            "flaky_tests": flaky,
+            "attempts": len(attempts),
+        }
+    )
 
 
 def _errors_of(stages: list[StageReport]) -> list[FailureItem]:
@@ -508,6 +612,23 @@ def _budget_message(limits: RunLimits, used_ms: int, used_tokens: int) -> str:
     return f"预算耗尽：后端自报 tokens {used_tokens} / {limits.max_tokens}"
 
 
+def _quarantined(stages: list[StageReport]) -> list[str]:
+    return sorted({ident for stage in stages for ident in stage.flaky_tests})
+
+
+def _critical_flaky(quarantined: list[str], patterns: list[str]) -> list[str]:
+    if not patterns:
+        return []
+    return [
+        ident for ident in quarantined if any(fnmatchcase(ident, pattern) for pattern in patterns)
+    ]
+
+
+def _flaky_baseline_message(critical: list[str], quarantined: list[str]) -> str:
+    names = ", ".join(critical[:5])
+    return f"关键测试不稳定：{names}；先修复测试再自动编码（基线隔离 {len(quarantined)} 项）"
+
+
 def _baseline_message(baseline: list[StageReport]) -> str:
     failed = next((item for item in baseline if item.status is not StageStatus.OK), None)
     if failed is None:
@@ -517,6 +638,9 @@ def _baseline_message(baseline: list[StageReport]) -> str:
     pre_existing = len({item.id for item in failed.test_failures})
     if pre_existing:
         message += f"；其中 {pre_existing} 项为原有失败（不算本任务引入）"
+    quarantined = len(_quarantined(baseline))
+    if quarantined:
+        message += f"；另有 {quarantined} 项不稳定测试已隔离"
     return f"{message}，拒绝交给模型"
 
 

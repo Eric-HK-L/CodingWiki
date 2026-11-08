@@ -30,16 +30,17 @@ def metrics_of(run: CodingRun) -> RunMetrics:
     baseline_ok = all(item.status is StageStatus.OK for item in run.baseline)
     baseline_ids = _test_ids(run.baseline)
     final_ids = _test_ids(run.stages)
+    quarantine = set(run.quarantined_tests)
     tests_parsed = any(item.tests_parsed for item in run.stages)
     if tests_parsed:
-        new_failures = len(final_ids - baseline_ids)
-        pre_existing = len(final_ids & baseline_ids)
+        new_failures = len(final_ids - baseline_ids - quarantine)
+        pre_existing = len((final_ids & baseline_ids) - quarantine)
         regression = bool(new_failures) or any(
             item.status is not StageStatus.OK for item in run.stages
         )
     else:
         new_failures = 0
-        pre_existing = len(baseline_ids)
+        pre_existing = len(baseline_ids - quarantine)
         regression = baseline_ok and run.stop_reason in {
             CodingStopReason.ROUNDS_EXHAUSTED,
             CodingStopReason.NO_PROGRESS,
@@ -60,6 +61,10 @@ def metrics_of(run: CodingRun) -> RunMetrics:
         new_failures=new_failures,
         pre_existing_failures=pre_existing,
         skipped_tests=sum(len(item.test_skipped) for item in run.stages),
+        flaky_tests=len(
+            {ident for stage in [*run.baseline, *run.stages] for ident in stage.flaky_tests}
+        ),
+        quarantined_tests=len(quarantine),
         guard_rejected=run.stop_reason is CodingStopReason.GUARD_REJECTED,
         verifier_rejected=run.stop_reason is CodingStopReason.VERIFY_REJECTED,
         budget_exceeded=run.stop_reason

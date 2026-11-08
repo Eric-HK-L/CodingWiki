@@ -1982,6 +1982,14 @@ JUNIT_SKIPPED = """<?xml version="1.0" encoding="UTF-8"?>
 </testsuites>
 """
 
+JUNIT_OK = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="nvlog" tests="1" failures="0">
+    <testcase classname="nvlog.case" name="ok"/>
+  </testsuite>
+</testsuites>
+"""
+
 JUNIT_SKIPPED_CASE = """    <testcase classname="nvlog.case" name="C">
       <skipped message="not implemented"/>
     </testcase>
@@ -2090,20 +2098,19 @@ def test_test_commands_junit_config() -> None:
 
 def test_run_task_junit_new_failure_is_regression(env: CodingEnv, tmp_path: Path) -> None:
     _with_commands(env, JUNIT_COMMANDS)
+    failed_round = (_result(CommandStatus.FAILED, stdout="FAILED B\n"), JUNIT_A_B)
     run, _worktree, runner = _run_with_xml(
         env,
         tmp_path,
-        [
-            (_result(), JUNIT_A),
-            (_result(CommandStatus.FAILED, stdout="FAILED B\n"), JUNIT_A_B),
-        ],
+        [(_result(), JUNIT_A)] * 3 + [failed_round] * 3,
         max_rounds=1,
     )
 
     assert run.status is CodingRunStatus.FAILED
     assert run.stop_reason is CodingStopReason.ROUNDS_EXHAUSTED
     assert {item.code for item in run.errors} == {"test:nvlog.case::A", "test:nvlog.case::B"}
-    assert len(runner.calls) == 2
+    assert run.stages[0].attempts == 3
+    assert len(runner.calls) == 6
 
     report = _report_of(env, run.run_id)
     assert report.metrics.tests_parsed
@@ -2114,14 +2121,11 @@ def test_run_task_junit_new_failure_is_regression(env: CodingEnv, tmp_path: Path
 
 def test_run_task_junit_pre_existing_failure_is_reported(env: CodingEnv, tmp_path: Path) -> None:
     _with_commands(env, JUNIT_COMMANDS)
+    failed_round = (_result(CommandStatus.FAILED, stdout="FAILED B\n"), JUNIT_A_B)
     run, _worktree, _runner = _run_with_xml(
         env,
         tmp_path,
-        [
-            (_result(), JUNIT_A),
-            (_result(CommandStatus.FAILED, stdout="FAILED B\n"), JUNIT_A_B),
-            (_result(), JUNIT_A),
-        ],
+        [(_result(), JUNIT_A)] * 3 + [failed_round] * 3 + [(_result(), JUNIT_A)],
         max_rounds=2,
     )
 
@@ -2146,7 +2150,10 @@ def test_run_task_junit_pre_existing_failure_is_reported(env: CodingEnv, tmp_pat
 def test_run_task_junit_skipped_is_not_pass(env: CodingEnv, tmp_path: Path) -> None:
     _with_commands(env, JUNIT_COMMANDS)
     run, _worktree, _runner = _run_with_xml(
-        env, tmp_path, [(_result(), JUNIT_A), (_result(), JUNIT_SKIPPED)], max_rounds=1
+        env,
+        tmp_path,
+        [(_result(), JUNIT_A)] * 3 + [(_result(), JUNIT_SKIPPED)],
+        max_rounds=1,
     )
 
     assert run.status is CodingRunStatus.FAILED
@@ -2161,13 +2168,13 @@ def test_run_task_junit_skipped_is_not_pass(env: CodingEnv, tmp_path: Path) -> N
 
 def test_run_task_junit_baseline_skipped_blocks_backend(env: CodingEnv, tmp_path: Path) -> None:
     _with_commands(env, JUNIT_COMMANDS)
-    run, _worktree, runner = _run_with_xml(env, tmp_path, [(_result(), JUNIT_SKIPPED)])
+    run, _worktree, runner = _run_with_xml(env, tmp_path, [(_result(), JUNIT_SKIPPED)] * 3)
 
     assert run.status is CodingRunStatus.FAILED
     assert run.stop_reason is CodingStopReason.BASELINE_FAILED
     assert run.backend is None
     assert "跳过不算通过" in run.message
-    assert len(runner.calls) == 1
+    assert len(runner.calls) == 3
 
 
 def test_run_task_junit_bad_xml_falls_back_to_log(env: CodingEnv, tmp_path: Path) -> None:
@@ -2175,10 +2182,8 @@ def test_run_task_junit_bad_xml_falls_back_to_log(env: CodingEnv, tmp_path: Path
     run, _worktree, _runner = _run_with_xml(
         env,
         tmp_path,
-        [
-            (_result(), JUNIT_A),
-            (_result(CommandStatus.FAILED, stderr="suite crashed\n"), "<not-junit>"),
-        ],
+        [(_result(), JUNIT_A)] * 3
+        + [(_result(CommandStatus.FAILED, stderr="suite crashed\n"), "<not-junit>")],
         max_rounds=1,
     )
 
@@ -2192,6 +2197,96 @@ def test_run_task_junit_bad_xml_falls_back_to_log(env: CodingEnv, tmp_path: Path
     report = _report_of(env, run.run_id)
     assert not report.metrics.tests_parsed
     assert report.metrics.regression
+
+
+# ---------------------------------------------------------------- S28 不稳定测试
+
+
+def test_test_commands_flaky_defaults_and_validation() -> None:
+    from codingwiki.domain.models import TestCommands
+
+    commands = TestCommands()
+    assert commands.baseline_runs == 3
+    assert commands.retries == 2
+    assert commands.critical_tests == []
+    with pytest.raises(ValidationError):
+        TestCommands(critical_tests=["  "])
+    with pytest.raises(ValidationError):
+        TestCommands(baseline_runs=0)
+    with pytest.raises(ValidationError):
+        TestCommands(retries=6)
+
+
+def test_run_task_baseline_flaky_is_quarantined(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, JUNIT_COMMANDS)
+    failed = (_result(CommandStatus.FAILED, stdout="FAILED A\n"), JUNIT_A)
+    run, _worktree, runner = _run_with_xml(
+        env,
+        tmp_path,
+        [failed, (_result(), JUNIT_OK), failed, (_result(), JUNIT_OK)],
+        max_rounds=1,
+    )
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert run.quarantined_tests == ["nvlog.case::A"]
+    assert run.baseline[0].attempts == 3
+    assert run.baseline[0].flaky_tests == ["nvlog.case::A"]
+    assert run.baseline[0].status is StageStatus.OK
+    assert len(runner.calls) == 4
+
+    report = _report_of(env, run.run_id)
+    assert report.metrics.flaky_tests == 1
+    assert report.metrics.quarantined_tests == 1
+    assert report.metrics.new_failures == 0
+    assert not report.metrics.regression
+
+
+def test_run_task_retry_rescues_flaky_test(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, JUNIT_COMMANDS)
+    run, _worktree, runner = _run_with_xml(
+        env,
+        tmp_path,
+        [(_result(), JUNIT_OK)] * 3
+        + [
+            (_result(CommandStatus.FAILED, stdout="FAILED A\n"), JUNIT_A),
+            (_result(), JUNIT_OK),
+        ],
+        max_rounds=2,
+    )
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert run.rounds == 1
+    assert run.stages[0].attempts == 2
+    assert run.stages[0].flaky_tests == ["nvlog.case::A"]
+    assert "不稳定测试 1 项" in run.message
+    assert len(runner.calls) == 5
+
+    report = _report_of(env, run.run_id)
+    assert report.metrics.flaky_tests == 1
+    assert report.metrics.quarantined_tests == 0
+    assert report.metrics.new_failures == 0
+    assert not report.metrics.regression
+
+
+def test_run_task_critical_flaky_stops_baseline(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(
+        env,
+        JUNIT_COMMANDS + '    baseline_runs: 3\n    critical_tests: ["nvlog.case::A"]\n',
+    )
+    failed = (_result(CommandStatus.FAILED, stdout="FAILED A\n"), JUNIT_A)
+    run, _worktree, runner = _run_with_xml(env, tmp_path, [failed, (_result(), JUNIT_OK), failed])
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.FLAKY_BASELINE
+    assert run.backend is None
+    assert run.quarantined_tests == ["nvlog.case::A"]
+    assert "关键测试不稳定" in run.message
+    assert len(runner.calls) == 3
+
+    escalation = EscalationReport.model_validate_json(
+        Path(run.escalation_path).read_text(encoding="utf-8")
+    )
+    assert escalation.reason is EscalationReason.FLAKY_TESTS
 
 
 # ---------------------------------------------------------------- S27 预算
