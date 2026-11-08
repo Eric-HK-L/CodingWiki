@@ -25,6 +25,8 @@ from codingwiki.coding import (
     run_backend,
     run_task,
 )
+from codingwiki.coding.commands import split_command, stage_specs
+from codingwiki.coding.errors import parse_failures
 from codingwiki.config import load_repo_config
 from codingwiki.domain.coding import (
     BackendConfig,
@@ -32,6 +34,9 @@ from codingwiki.domain.coding import (
     CodedTask,
     CodingRun,
     CodingRunStatus,
+    CodingStopReason,
+    StageKind,
+    StageStatus,
     TaskPacket,
 )
 from codingwiki.domain.models import RepoConfig
@@ -47,6 +52,7 @@ from codingwiki.domain.spec import (
     ValidationReport,
 )
 from codingwiki.errors import InputError
+from codingwiki.exec import CommandResult, CommandSpec, CommandStatus
 from codingwiki.patch import WorkspaceManager
 from codingwiki.providers import GitProvider
 
@@ -542,15 +548,16 @@ def test_run_task_success(env: CodingEnv, tmp_path: Path) -> None:
     _repo_obj, manager, run = _run(env, tmp_path, SUCCESS_BACKEND)
 
     assert run.status is CodingRunStatus.SUCCEEDED
-    assert run.backend.status is BackendStatus.OK
-    assert run.guard.verdict is PatchVerdict.PASS
+    assert run.stop_reason is CodingStopReason.SUCCEEDED
+    assert run.backend is not None and run.backend.status is BackendStatus.OK
+    assert run.guard is not None and run.guard.verdict is PatchVerdict.PASS
     assert run.rounds == 1
     assert run.guard.stats.files == 1
     assert run.guard.stats.added_lines >= 1
-    assert run.message == "首轮编码通过"
+    assert run.message == "第 1 轮通过：无命令"
 
     run_dir = _run_dir(env, run.run_id)
-    for name in ("run.json", "check.json", "backend.log", "result.json"):
+    for name in ("run.json", "check.json", "round-1/backend.log", "round-1/result.json"):
         assert (run_dir / name).is_file(), name
     assert (manager.home / "patches" / "demo" / "T-001" / "check.json").is_file()
 
@@ -559,8 +566,9 @@ def test_run_task_guard_rejects_forbidden_patch(env: CodingEnv, tmp_path: Path) 
     _repo_obj, manager, run = _run(env, tmp_path, FORBIDDEN_BACKEND, name="forbidden.py")
 
     assert run.status is CodingRunStatus.FAILED
-    assert run.backend.status is BackendStatus.OK
-    assert run.guard.verdict is PatchVerdict.FAIL
+    assert run.stop_reason is CodingStopReason.GUARD_REJECTED
+    assert run.backend is not None and run.backend.status is BackendStatus.OK
+    assert run.guard is not None and run.guard.verdict is PatchVerdict.FAIL
     assert "path.forbidden" in {item.code for item in run.guard.findings}
     assert run.message.startswith("PatchGuard 拒绝：")
     assert manager.load("demo", "T-001").active
@@ -570,8 +578,9 @@ def test_run_task_backend_failure(env: CodingEnv, tmp_path: Path) -> None:
     _repo_obj, manager, run = _run(env, tmp_path, FAILING_BACKEND, name="failing.py")
 
     assert run.status is CodingRunStatus.FAILED
-    assert run.backend.status is BackendStatus.FAILED
-    assert run.guard.verdict is PatchVerdict.PASS
+    assert run.stop_reason is CodingStopReason.BACKEND_FAILED
+    assert run.backend is not None and run.backend.status is BackendStatus.FAILED
+    assert run.guard is not None and run.guard.verdict is PatchVerdict.PASS
     assert run.message == "后端未成功：failed"
 
 
@@ -694,5 +703,314 @@ def test_cli_coding_packet_and_run(
     out = capsys.readouterr().out
     assert rc == 0
     assert "status=succeeded" in out
+    assert "stop=succeeded" in out
     assert "guard=pass" in out
-    assert "说明: 首轮编码通过" in out
+    assert "说明: 第 1 轮通过：无命令" in out
+
+
+# ---------------------------------------------------------------- S20 命令与多轮
+
+
+class FakeRunner:
+    """按队列返回预置结果，并记录收到的 CommandSpec。"""
+
+    def __init__(self, results: list[CommandResult]) -> None:
+        self._results = list(results)
+        self.calls: list[CommandSpec] = []
+
+    def run(self, spec: CommandSpec) -> CommandResult:
+        self.calls.append(spec)
+        if not self._results:
+            raise AssertionError("FakeRunner 结果已耗尽")
+        return self._results.pop(0)
+
+
+def _result(
+    status: CommandStatus = CommandStatus.OK,
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    exit_code: int | None = None,
+) -> CommandResult:
+    if exit_code is None:
+        exit_code = 0 if status is CommandStatus.OK else 1
+    return CommandResult(
+        status=status,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        duration_ms=10,
+    )
+
+
+GCC_ERROR = "nvlog/src/nvlog.c:12:5: error: use of undeclared identifier 'level'\n"
+COMPILE_ONLY = 'commands:\n  build:\n    compile: "fake-compiler build"\n'
+
+
+def _with_commands(env: CodingEnv, block: str) -> None:
+    (env.config_dir / "demo.yaml").write_text(
+        f"repo_id: demo\nprovider: git\nurl: {env.origin}\nbranch: main\n{block}\n",
+        encoding="utf-8",
+    )
+
+
+def _run_with_runner(
+    env: CodingEnv,
+    tmp_path: Path,
+    runner: FakeRunner,
+    *,
+    max_rounds: int = 5,
+    body: str = SUCCESS_BACKEND,
+) -> tuple[CodingRun, Path]:
+    repo, manager, worktree, spec, task = _setup(env)
+    script = _script(tmp_path, body)
+    run = run_task(
+        GitProvider(),
+        manager,
+        repo,
+        spec,
+        task,
+        _config(script),
+        max_rounds=max_rounds,
+        runner=runner,
+    )
+    return run, worktree
+
+
+def test_split_command_handles_quotes_and_rejects_bad_input() -> None:
+    assert split_command("cmake --build build -j 8") == [
+        "cmake",
+        "--build",
+        "build",
+        "-j",
+        "8",
+    ]
+    assert split_command("ctest --test-dir build -R 'nvlog.*'") == [
+        "ctest",
+        "--test-dir",
+        "build",
+        "-R",
+        "nvlog.*",
+    ]
+    with pytest.raises(InputError):
+        split_command("echo 'unterminated")
+    with pytest.raises(InputError):
+        split_command("   ")
+
+
+def test_stage_specs_order_cwd_and_timeouts(tmp_path: Path) -> None:
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    (config_dir / "demo.yaml").write_text(
+        "repo_id: demo\n"
+        "provider: git\n"
+        "url: ./origin\n"
+        "commands:\n"
+        '  build: {configure: "cfg-cmd", compile: "build-cmd", timeout_s: 120}\n'
+        '  lint: {command: "lint-cmd", timeout_s: 30}\n'
+        '  test: {fast: "fast-cmd", full: "full-cmd", timeout_s: 900}\n',
+        encoding="utf-8",
+    )
+    repo = load_repo_config(config_dir / "demo.yaml")
+    root = tmp_path / "ws"
+
+    pairs = stage_specs(repo, workspace_root=root)
+
+    assert [kind for kind, _spec in pairs] == [
+        StageKind.CONFIGURE,
+        StageKind.LINT,
+        StageKind.COMPILE,
+        StageKind.TEST_FAST,
+        StageKind.TEST_FULL,
+    ]
+    assert all(spec.cwd == str(root) for _kind, spec in pairs)
+    assert pairs[0][1].timeout_s == 120
+    assert pairs[1][1].timeout_s == 30
+    assert pairs[3][1].timeout_s == 900
+
+
+def test_parse_failures_gcc_diagnostic() -> None:
+    items = parse_failures(StageKind.COMPILE, "", GCC_ERROR)
+
+    assert len(items) == 1
+    item = items[0]
+    assert item.file == "nvlog/src/nvlog.c"
+    assert item.line == 12
+    assert item.code == "compile.diagnostic"
+    assert "undeclared identifier" in item.message
+
+
+def test_parse_failures_cmake_and_ctest() -> None:
+    cmake = parse_failures(StageKind.CONFIGURE, "", "CMake Error at CMakeLists.txt:23 (x):\n")
+    assert cmake[0].code == "cmake.error"
+    assert cmake[0].file == "CMakeLists.txt"
+    assert cmake[0].line == 23
+
+    ctest = parse_failures(
+        StageKind.TEST_FAST,
+        "The following tests FAILED:\n\t 12 - test_nvlog (Failed)\n",
+        "",
+    )
+    assert ctest[0].code == "test.failed"
+    assert ctest[0].message == "test_nvlog"
+
+
+def test_parse_failures_fallback_and_limit() -> None:
+    fallback = parse_failures(StageKind.LINT, "", "some opaque output\n")
+    assert fallback[0].code == "lint.failed"
+    assert "opaque output" in fallback[0].message
+
+    lines = "\n".join(f"src/f{index}.c:{index}:1: error: e{index}" for index in range(30))
+    items = parse_failures(StageKind.COMPILE, "", lines)
+    assert len(items) == 20
+
+
+def test_run_task_with_stages_one_round(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner([_result(), _result()])
+    run, worktree = _run_with_runner(env, tmp_path, runner)
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert run.stop_reason is CodingStopReason.SUCCEEDED
+    assert run.rounds == 1
+    assert [item.kind for item in run.baseline] == [StageKind.COMPILE]
+    assert run.baseline[0].status is StageStatus.OK
+    assert [item.kind for item in run.stages] == [StageKind.COMPILE]
+    assert len(runner.calls) == 2
+    assert runner.calls[0].cwd == str(worktree)
+    assert run.message.startswith("第 1 轮通过：compile:ok")
+
+
+def test_run_task_round_two_converges(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner([_result(), _result(CommandStatus.FAILED, stderr=GCC_ERROR), _result()])
+    run, _worktree = _run_with_runner(env, tmp_path, runner)
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert run.stop_reason is CodingStopReason.SUCCEEDED
+    assert run.rounds == 2
+    assert run.round_reports[0].errors[0].file == "nvlog/src/nvlog.c"
+    assert run.round_reports[0].stages[0].status is StageStatus.FAILED
+    assert run.round_reports[1].errors == []
+    assert run.stages[0].status is StageStatus.OK
+
+    run_dir = _run_dir(env, run.run_id)
+    assert (run_dir / "round-1" / "errors.json").is_file()
+    round2_packet = run_dir / "round-2" / "packet"
+    assert (round2_packet / "errors.json").is_file()
+    assert "上一轮失败" in (round2_packet / "prompt.md").read_text(encoding="utf-8")
+
+
+def test_run_task_no_progress_stops(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner(
+        [
+            _result(),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+        ]
+    )
+    run, _worktree = _run_with_runner(env, tmp_path, runner, max_rounds=5)
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.NO_PROGRESS
+    assert run.rounds == 2
+    assert run.message == "连续两轮同一错误，停止并转人工"
+
+
+def test_run_task_rounds_exhausted(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner(
+        [
+            _result(),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+            _result(
+                CommandStatus.FAILED,
+                stderr="nvlog/src/nvlog.c:20:5: error: another failure\n",
+            ),
+        ]
+    )
+    run, _worktree = _run_with_runner(env, tmp_path, runner, max_rounds=2)
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.ROUNDS_EXHAUSTED
+    assert run.rounds == 2
+    assert run.message == "2 轮后仍有 1 项失败"
+
+
+def test_run_task_baseline_failure_blocks_backend(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner([_result(CommandStatus.FAILED, stderr=GCC_ERROR)])
+    run, worktree = _run_with_runner(env, tmp_path, runner)
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.BASELINE_FAILED
+    assert run.rounds == 0
+    assert run.backend is None
+    assert run.guard is None
+    assert run.baseline[0].status is StageStatus.FAILED
+    assert run.message.startswith("基线未通过：compile")
+    assert len(runner.calls) == 1
+
+    run_dir = _run_dir(env, run.run_id)
+    assert (run_dir / "baseline" / "stages.json").is_file()
+    assert (run_dir / "baseline" / "errors.json").is_file()
+    assert "int level = 1;" not in (worktree / "nvlog/src/nvlog.c").read_text(encoding="utf-8")
+
+
+def test_cli_coding_run_with_commands(
+    env: CodingEnv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup(env)
+    compile_ok = _script(tmp_path, "import sys\nsys.exit(0)\n", "compile_ok.py")
+    _with_commands(
+        env,
+        f'commands:\n  build:\n    compile: "{sys.executable} {compile_ok}"\n',
+    )
+    spec_dir = _write_spec_dir(tmp_path / "specs", snapshot_id=f"demo@{env.rev}")
+    script = _script(tmp_path, SUCCESS_BACKEND, "backend_cli.py")
+    backend_path = tmp_path / "backend-cli.yaml"
+    backend_path.write_text(
+        yaml.safe_dump(
+            {
+                "kind": "command",
+                "command": [
+                    sys.executable,
+                    str(script),
+                    "{packet_dir}",
+                    "{workspace}",
+                    "{result_path}",
+                ],
+                "timeout_seconds": 30,
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "coding",
+            "run",
+            "--spec-dir",
+            str(spec_dir),
+            "--task",
+            "T-001",
+            "--backend-config",
+            str(backend_path),
+            "--max-rounds",
+            "2",
+            "--config-dir",
+            str(env.config_dir),
+            "--repo",
+            "demo",
+        ]
+    )
+    captured = capsys.readouterr()
+    out = captured.out
+
+    assert rc == 0, captured.err
+    assert "status=succeeded" in out
+    assert "rounds=1/2" in out
+    assert "基线: compile:ok" in out
+    assert "阶段: compile:ok" in out

@@ -25,10 +25,68 @@ class BackendStatus(StrEnum):
 
 
 class CodingRunStatus(StrEnum):
-    """首轮编码运行结论。"""
+    """编码运行结论。"""
 
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+class CodingStopReason(StrEnum):
+    """停止原因；比 succeeded/failed 更细，便于人工分诊。"""
+
+    SUCCEEDED = "succeeded"
+    BASELINE_FAILED = "baseline_failed"
+    BACKEND_FAILED = "backend_failed"
+    GUARD_REJECTED = "guard_rejected"
+    ROUNDS_EXHAUSTED = "rounds_exhausted"
+    NO_PROGRESS = "no_progress"
+
+
+class StageKind(StrEnum):
+    """编排器执行的检查阶段（14.5.4 / 14.7.1）。"""
+
+    CONFIGURE = "configure"
+    LINT = "lint"
+    COMPILE = "compile"
+    TEST_FAST = "test-fast"
+    TEST_FULL = "test-full"
+
+
+class StageStatus(StrEnum):
+    """阶段结局；与 exec.CommandStatus 取值一致。"""
+
+    OK = "ok"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    ERROR = "error"
+
+
+class StageReport(_WikiModel):
+    """一次构建/测试/lint 命令的结果（stage 级，不含原始全量日志）。"""
+
+    kind: StageKind
+    command: list[str] = Field(default_factory=list)
+    status: StageStatus
+    exit_code: int
+    duration_ms: int = Field(default=0, ge=0)
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    artifacts: list[str] = Field(default_factory=list)
+
+
+class FailureItem(_WikiModel):
+    """结构化失败项：文件/行/错误码/消息；回喂模型的就是这个列表。"""
+
+    stage: StageKind
+    code: str = Field(min_length=1)
+    file: str = ""
+    line: int = Field(default=0, ge=0)
+    message: str = Field(min_length=1)
+
+    @property
+    def key(self) -> tuple[str, str, int, str]:
+        """去重/无进展判定用的稳定键（消息截断，避免长尾变化）。"""
+        return (self.stage.value, self.file, self.line, self.message[:120])
 
 
 class CodedTask(_WikiModel):
@@ -75,6 +133,8 @@ class TaskPacket(_WikiModel):
     schema_path: str = Field(min_length=1)
     packet_dir: str = Field(min_length=1)
     policy: PatchPolicy
+    round: int = Field(default=1, ge=1)
+    errors_path: str = ""
     created_at: datetime
 
 
@@ -110,8 +170,19 @@ class BackendResult(_WikiModel):
     error: str = ""
 
 
+class RoundReport(_WikiModel):
+    """一轮“后端 → guard → 构建/测试”的完整记录。"""
+
+    index: int = Field(ge=1)
+    backend: BackendResult
+    guard: PatchReport
+    stages: list[StageReport] = Field(default_factory=list)
+    errors: list[FailureItem] = Field(default_factory=list)
+    message: str = ""
+
+
 class CodingRun(_WikiModel):
-    """一次首轮编码运行（runs/<run_id>/run.json）。"""
+    """一次编码运行（runs/<run_id>/run.json）。"""
 
     run_id: str = Field(pattern=r"^RUN-[A-Za-z0-9._-]+$")
     repo_id: str = Field(min_length=1)
@@ -120,10 +191,16 @@ class CodingRun(_WikiModel):
     base_revision: str = Field(min_length=1)
     workspace: str = Field(min_length=1)
     status: CodingRunStatus
-    rounds: int = Field(default=1, ge=1)
-    packet_dir: str = Field(min_length=1)
-    backend: BackendResult
-    guard: PatchReport
+    stop_reason: CodingStopReason = CodingStopReason.SUCCEEDED
+    rounds: int = Field(default=0, ge=0)
+    max_rounds: int = Field(default=1, ge=1)
+    packet_dir: str = ""
+    backend: BackendResult | None = None
+    guard: PatchReport | None = None
+    baseline: list[StageReport] = Field(default_factory=list)
+    stages: list[StageReport] = Field(default_factory=list)
+    errors: list[FailureItem] = Field(default_factory=list)
+    round_reports: list[RoundReport] = Field(default_factory=list)
     message: str = ""
     created_at: datetime
 
@@ -135,6 +212,12 @@ __all__ = [
     "CodedTask",
     "CodingRun",
     "CodingRunStatus",
+    "CodingStopReason",
     "ContextFile",
+    "FailureItem",
+    "RoundReport",
+    "StageKind",
+    "StageReport",
+    "StageStatus",
     "TaskPacket",
 ]
