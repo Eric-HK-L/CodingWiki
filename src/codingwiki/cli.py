@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from codingwiki.domain.coding import CodedTask
+    from codingwiki.domain.coding import CodedTask, StageReport
     from codingwiki.domain.eval import EvalReport, QuestionResult
     from codingwiki.domain.job import JobRecord
     from codingwiki.domain.spec import EvidenceBundle, ExtractionResult, Requirement, SpecDocument
@@ -426,7 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
     patch_check_parser.set_defaults(handler=_cmd_patch_check)
 
     coding_parser = subcommands.add_parser(
-        "coding", help="编码任务包与模型后端（S19：首轮编码，不跑编译/测试）"
+        "coding", help="编码任务包、模型后端与构建/测试编排（S19–S20）"
     )
     coding_subcommands = coding_parser.add_subparsers(dest="coding_command", required=True)
 
@@ -448,13 +448,16 @@ def build_parser() -> argparse.ArgumentParser:
     coding_packet_build.set_defaults(handler=_cmd_coding_packet_build)
 
     coding_run_parser = coding_subcommands.add_parser(
-        "run", help="首轮编码：任务包 → 后端 → PatchGuard"
+        "run", help="多轮编码：基线 → 任务包 → 后端 → PatchGuard → 构建/测试"
     )
     coding_run_parser.add_argument("--repo", required=True, help="仓库 ID")
     coding_run_parser.add_argument("--spec-dir", required=True, help="approved Spec 目录")
     coding_run_parser.add_argument("--task", required=True, help="任务 ID")
     coding_run_parser.add_argument("--backend-config", required=True, help="后端 YAML 配置")
     coding_run_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    coding_run_parser.add_argument(
+        "--max-rounds", type=int, default=5, help="最大修复轮次（默认 5）"
+    )
     coding_run_parser.set_defaults(handler=_cmd_coding_run)
 
     return parser
@@ -1365,7 +1368,7 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
     spec = load_approved_spec(args.spec_dir)
     task = _coded_task(spec, args.task)
     config = load_backend_config(args.backend_config)
-    run = run_task(provider, manager, repo, spec, task, config)
+    run = run_task(provider, manager, repo, spec, task, config, max_rounds=args.max_rounds)
 
     run_path = (
         manager.home
@@ -1377,18 +1380,31 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
         / run.run_id
         / "run.json"
     )
+    backend = run.backend.status.value if run.backend is not None else "none"
+    guard = run.guard.verdict.value if run.guard is not None else "skip"
+    files = run.guard.stats.files if run.guard is not None else 0
+    added = run.guard.stats.added_lines if run.guard is not None else 0
+    deleted = run.guard.stats.deleted_lines if run.guard is not None else 0
     print(
         f"编码运行: {run.run_id}, status={run.status.value}, "
-        f"backend={run.backend.status.value}, guard={run.guard.verdict.value}, "
-        f"files={run.guard.stats.files}, "
-        f"lines=+{run.guard.stats.added_lines}/-{run.guard.stats.deleted_lines}"
+        f"stop={run.stop_reason.value}, rounds={run.rounds}/{run.max_rounds}, "
+        f"backend={backend}, guard={guard}, "
+        f"files={files}, lines=+{added}/-{deleted}"
     )
+    if run.baseline:
+        print(f"基线: {' '.join(_stage_line(item) for item in run.baseline)}")
+    if run.stages:
+        print(f"阶段: {' '.join(_stage_line(item) for item in run.stages)}")
     if run.message:
         print(f"说明: {run.message}")
     print(f"结果: {run_path}")
     return (
         int(ExitCode.OK) if run.status is CodingRunStatus.SUCCEEDED else int(ExitCode.ENVIRONMENT)
     )
+
+
+def _stage_line(item: StageReport) -> str:
+    return f"{item.kind.value}:{item.status.value}"
 
 
 def _app_config_or_default(path: str) -> AppConfig:

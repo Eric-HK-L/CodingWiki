@@ -11,7 +11,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from codingwiki.domain.coding import CodedTask, ContextFile, TaskPacket
+from codingwiki.domain.coding import CodedTask, ContextFile, FailureItem, TaskPacket
 from codingwiki.domain.patch import PatchPolicy
 from codingwiki.domain.spec import SpecDocument
 from codingwiki.errors import InputError
@@ -39,11 +39,14 @@ def build_packet(
     packet_dir: Path,
     policy: PatchPolicy,
     root: str = "",
+    errors: list[FailureItem] | None = None,
+    round_index: int = 1,
     now: datetime | None = None,
 ) -> TaskPacket:
     """生成任务包并写盘；允许文件缺失即拒绝。
 
     root 为 RepoConfig.root：允许文件路径相对代码根，而工作树是仓库根。
+    errors 非空时写 errors.json，供下一轮模型读取上一轮失败。
     """
     packet_dir.mkdir(parents=True, exist_ok=True)
     source = workspace / root if root else workspace
@@ -53,8 +56,17 @@ def build_packet(
     excerpt.write_text(_spec_excerpt(spec), encoding="utf-8")
     context.append(_fingerprint(excerpt, packet_dir))
 
+    errors_path = ""
+    if errors:
+        errors_file = packet_dir / "errors.json"
+        errors_file.write_text(_errors_text(errors), encoding="utf-8")
+        errors_path = str(errors_file.resolve())
+
     prompt = packet_dir / "prompt.md"
-    prompt.write_text(_prompt(task, spec, workspace, source, packet_dir), encoding="utf-8")
+    prompt.write_text(
+        _prompt(task, spec, workspace, source, packet_dir, errors, round_index),
+        encoding="utf-8",
+    )
     schema = packet_dir / "schema.json"
     schema.write_text(
         json.dumps(_RESULT_SCHEMA, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -73,6 +85,8 @@ def build_packet(
         schema_path=str(schema.resolve()),
         packet_dir=str(packet_dir.resolve()),
         policy=policy,
+        round=round_index,
+        errors_path=errors_path,
         created_at=now or datetime.now(UTC),
     )
     (packet_dir / "task.json").write_text(packet.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -108,11 +122,22 @@ def _spec_excerpt(spec: SpecDocument) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _errors_text(errors: list[FailureItem]) -> str:
+    payload = [item.model_dump(mode="json") for item in errors]
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
 def _prompt(
-    task: CodedTask, spec: SpecDocument, workspace: Path, source: Path, packet_dir: Path
+    task: CodedTask,
+    spec: SpecDocument,
+    workspace: Path,
+    source: Path,
+    packet_dir: Path,
+    errors: list[FailureItem] | None,
+    round_index: int,
 ) -> str:
     parts = [
-        f"# 编码任务 {task.id}：{task.title}",
+        f"# 编码任务 {task.id}：{task.title}（第 {round_index} 轮）",
         "",
         f"- Spec：{spec.spec_id}",
         f"- 工作树：{workspace.resolve()}",
@@ -139,15 +164,35 @@ def _prompt(
         "",
         "需求、方案、影响分析、测试计划、任务拆分见同目录 `spec-excerpt.md`。",
         "",
-        "## 输出约定",
-        "",
-        "- 直接修改工作树中的文件；不要新建允许清单外的文件。",
-        "- 不要执行构建、测试或网络命令；这些由编排器执行。",
-        "- 可写 `result.json`（结构见 `schema.json`）：`status` 为 ok/failed，附简短 summary；"
-        "不写也不影响退出码与 diff 判定。",
-        "",
     ]
+    if errors:
+        parts.extend(
+            [
+                "## 上一轮失败（编排器已结构化，见 errors.json）",
+                "",
+                *[_format_error(item) for item in errors],
+                "",
+                "请只修复上述失败项；不要跳过测试、删除断言或放宽检查。",
+                "",
+            ]
+        )
+    parts.extend(
+        [
+            "## 输出约定",
+            "",
+            "- 直接修改工作树中的文件；不要新建允许清单外的文件。",
+            "- 不要执行构建、测试或网络命令；这些由编排器执行。",
+            "- 可写 `result.json`（结构见 `schema.json`）：`status` 为 ok/failed，附简短 summary；"
+            "不写也不影响退出码与 diff 判定。",
+            "",
+        ]
+    )
     return "\n".join(parts)
+
+
+def _format_error(item: FailureItem) -> str:
+    location = f"{item.file}:{item.line}" if item.file else "—"
+    return f"- [{item.stage.value}/{item.code}] {location} {item.message[:200]}"
 
 
 __all__ = ["build_packet"]
