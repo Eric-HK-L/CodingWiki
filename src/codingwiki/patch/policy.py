@@ -172,6 +172,40 @@ _GENERATED_MARKER_RE = re.compile(
 
 _TODO_RE = re.compile(r"(?:TODO|FIXME|XXX)\b")
 
+# 网络调用扫描：新增代码里出现外部 HTTP/socket 访问时降级为 WARNING（
+# 计划 14.5.3 要求人工复核；误报代价高于漏报，故不直接拒绝）。
+_NETWORK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"\b(?:requests|httpx)\.(?:get|post|put|patch|delete|head|request)\s*\("),
+        "HTTP 客户端",
+    ),
+    (re.compile(r"\burlopen\s*\(|\burllib\.request\b|\bhttp\.client\b"), "urllib/http.client"),
+    (
+        re.compile(r"\b(?:socket|ssl)\.(?:connect|create_connection)\s*\("),
+        "socket 连接",
+    ),
+    (
+        re.compile(r"\baxios\.(?:get|post|put|patch|delete|request)\b"),
+        "axios",
+    ),
+    (re.compile(r"\bfetch\s*\(\s*['\"`]http"), "fetch"),
+    (re.compile(r"\b(?:HttpClient|OkHttpClient|URLSession)\b"), "HTTP 客户端"),
+    (re.compile(r"\b(?:curl|wget)\s+(?:-|http)"), "curl/wget"),
+)
+
+# 危险命令/能力扫描：真正能破坏环境或执行任意代码的写法直接拒绝；
+# eval/exec 误报面较大，降级为 WARNING 供复核。
+_DANGEROUS_PATTERNS: tuple[tuple[re.Pattern[str], str, FindingSeverity], ...] = (
+    (re.compile(r"\bos\.system\s*\("), "os.system", FindingSeverity.BLOCKER),
+    (re.compile(r"\bshell\s*=\s*True\b"), "shell=True", FindingSeverity.BLOCKER),
+    (re.compile(r"\brm\s+-rf\b"), "rm -rf", FindingSeverity.BLOCKER),
+    (re.compile(r"\bsudo\s+"), "sudo", FindingSeverity.BLOCKER),
+    (re.compile(r"\bchmod\s+777\b"), "chmod 777", FindingSeverity.BLOCKER),
+    (re.compile(r"\|[^\n|]*\b(?:sh|bash)\b"), "管道执行 shell", FindingSeverity.BLOCKER),
+    (re.compile(r"\bbase64\s+--?d(?:ecode)?\s*\|"), "base64 解码后执行", FindingSeverity.BLOCKER),
+    (re.compile(r"\b(?:eval|exec)\s*\("), "eval/exec", FindingSeverity.WARNING),
+)
+
 
 def deny_reason(path: str) -> str:
     """命中禁止清单时返回原因；未命中返回空串。"""
@@ -269,8 +303,9 @@ def limit_findings(stats: PatchStats, policy: PatchPolicy) -> list[PatchFinding]
 
 
 def content_findings(diffs: Iterable[FileDiff], policy: PatchPolicy) -> list[PatchFinding]:
+    items = list(diffs)
     findings: list[PatchFinding] = []
-    for item in diffs:
+    for item in items:
         if item.binary:
             findings.append(
                 PatchFinding(
@@ -323,7 +358,30 @@ def content_findings(diffs: Iterable[FileDiff], policy: PatchPolicy) -> list[Pat
         if is_test_path(item.path):
             findings.extend(_removed_assertion_findings(item))
         findings.extend(_comment_block_findings(item, policy))
+    findings.extend(test_first_findings(items, policy))
     return findings
+
+
+def test_first_findings(diffs: Iterable[FileDiff], policy: PatchPolicy) -> list[PatchFinding]:
+    """改动源码却没有任何测试改动时给出 WARNING（计划 14.5.2）。
+
+    允许“先实现最小接口、再补测试”，但必须在交付说明中注明；
+    因此这里只提示，不阻断。
+    """
+    if not policy.require_test_first:
+        return []
+    items = [item for item in diffs if item.kind is not ChangeKind.DELETED]
+    code = [item for item in items if is_code_path(item.path) and not is_test_path(item.path)]
+    if not code or any(is_test_path(item.path) for item in items):
+        return []
+    return [
+        PatchFinding(
+            code="test.first_missing",
+            severity=FindingSeverity.WARNING,
+            message="改动源码但未新增/修改测试；若先实现接口、后续补测试，请在交付说明中注明",
+            path=code[0].path,
+        )
+    ]
 
 
 def _added_line_findings(item: FileDiff, policy: PatchPolicy) -> list[PatchFinding]:
@@ -348,6 +406,28 @@ def _added_line_findings(item: FileDiff, policy: PatchPolicy) -> list[PatchFindi
                             code="diff.debug_output",
                             severity=FindingSeverity.BLOCKER,
                             message=f"{item.path} 新增调试输出（{label}）",
+                            path=item.path,
+                        )
+                    )
+                    break
+            for pattern, label in _NETWORK_PATTERNS:
+                if pattern.search(line):
+                    findings.append(
+                        PatchFinding(
+                            code="diff.network_call",
+                            severity=FindingSeverity.WARNING,
+                            message=f"{item.path} 新增网络调用（{label}），需人工复核",
+                            path=item.path,
+                        )
+                    )
+                    break
+            for pattern, label, severity in _DANGEROUS_PATTERNS:
+                if pattern.search(line):
+                    findings.append(
+                        PatchFinding(
+                            code="diff.dangerous_call",
+                            severity=severity,
+                            message=f"{item.path} 新增危险调用（{label}）",
                             path=item.path,
                         )
                     )
@@ -432,4 +512,5 @@ __all__ = [
     "limit_findings",
     "path_findings",
     "stats_of",
+    "test_first_findings",
 ]
