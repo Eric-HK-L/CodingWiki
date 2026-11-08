@@ -29,6 +29,7 @@ from codingwiki.coding import (
     load_backend_config,
     mechanical_report,
     render_escalation,
+    replay_run,
     run_backend,
     run_task,
 )
@@ -44,6 +45,7 @@ from codingwiki.domain.coding import (
     CodingStopReason,
     EscalationReason,
     EscalationReport,
+    ReplayStatus,
     StageKind,
     StageReport,
     StageStatus,
@@ -1690,3 +1692,86 @@ def test_cli_coding_run_prints_audit(
     assert rc == 0, captured.err
     assert "审计: " in captured.out
     assert "（1 条）" in captured.out
+
+
+# ---------------------------------------------------------------- S24 补丁重放
+
+
+def _replay(env: CodingEnv, run: CodingRun, results: list[CommandResult]) -> object:
+    spec = _spec_doc(snapshot_id=f"demo@{env.rev}")
+    task = next(item for item in decompose(spec) if item.id == run.task_id)
+    return replay_run(
+        GitProvider(),
+        _manager(env),
+        _repo(env),
+        spec,
+        task,
+        run,
+        runner=FakeRunner(results),
+    )
+
+
+def test_replay_reproduces_successful_run(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    run, _worktree = _run_with_runner(env, tmp_path, FakeRunner([_result(), _result()]))
+
+    report = _replay(env, run, [_result()])
+
+    assert report.status is ReplayStatus.REPRODUCED
+    assert len(report.checks) == 1
+    assert report.checks[0].kind is StageKind.COMPILE
+    assert report.checks[0].matched
+    assert report.message == "1/1 个阶段与原运行一致"
+    assert len(report.patch_sha256) == 64
+    assert "diff --git" in Path(report.patch_path).read_text(encoding="utf-8")
+    assert (Path(report.replay_dir) / "stages.json").is_file()
+    assert (_run_dir(env, run.run_id) / "replay.json").is_file()
+    assert not (Path(report.replay_dir) / "worktree").exists()
+
+
+def test_replay_detects_divergence(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    run, _worktree = _run_with_runner(env, tmp_path, FakeRunner([_result(), _result()]))
+
+    report = _replay(env, run, [_result(CommandStatus.FAILED, stderr=GCC_ERROR)])
+
+    assert report.status is ReplayStatus.DIVERGED
+    assert not report.checks[0].matched
+    assert report.checks[0].actual_status is StageStatus.FAILED
+    assert report.message == "0/1 个阶段与原运行一致"
+
+
+def test_replay_refuses_guard_rejected_run(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, _manager_obj, run = _run(env, tmp_path, FORBIDDEN_BACKEND, name="forbidden.py")
+
+    with pytest.raises(InputError, match="PatchGuard 未通过"):
+        _replay(env, run, [])
+
+
+def test_cli_replay_reproduces(
+    env: CodingEnv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    run, _worktree = _run_with_runner(env, tmp_path, FakeRunner([_result(), _result()]))
+    _with_commands(env, 'commands:\n  build:\n    compile: "true"\n')
+    spec_dir = _write_spec_dir(tmp_path / "specs", snapshot_id=f"demo@{env.rev}")
+
+    rc = main(
+        [
+            "coding",
+            "replay",
+            "--run",
+            str(_run_dir(env, run.run_id) / "run.json"),
+            "--repo",
+            "demo",
+            "--spec-dir",
+            str(spec_dir),
+            "--config-dir",
+            str(env.config_dir),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0, captured.err
+    assert "重放: status=reproduced stages=1/1" in captured.out
+    assert "结果: " in captured.out

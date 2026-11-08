@@ -292,6 +292,43 @@ class EscalationReport(_WikiModel):
     created_at: datetime
 
 
+class ReplayStatus(StrEnum):
+    """补丁重放结论（架构 §9 报告可复现）。"""
+
+    REPRODUCED = "reproduced"
+    DIVERGED = "diverged"
+    FAILED = "failed"
+
+
+class ReplayCheck(_WikiModel):
+    """一个阶段的重放对比：期望（原运行）与实际（重放工作树）。"""
+
+    kind: StageKind
+    expected_status: StageStatus
+    expected_exit_code: int
+    actual_status: StageStatus | None = None
+    actual_exit_code: int = 0
+    matched: bool = False
+
+
+class ReplayReport(_WikiModel):
+    """一次补丁重放（replay.json）：快照 + 补丁 + 阶段结果对比。"""
+
+    run_id: str = Field(pattern=r"^RUN-[A-Za-z0-9._-]+$")
+    repo_id: str = Field(min_length=1)
+    spec_id: str = Field(pattern=r"^F-\d{3}$")
+    task_id: str = Field(pattern=r"^T-\d{3}$")
+    base_revision: str = Field(min_length=1)
+    patch_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: ReplayStatus
+    checks: list[ReplayCheck] = Field(default_factory=list)
+    workspace: str
+    replay_dir: str
+    patch_path: str
+    message: str = ""
+    created_at: datetime
+
+
 class CodingRun(_WikiModel):
     """一次编码运行（runs/<run_id>/run.json）。"""
 
@@ -333,6 +370,9 @@ __all__ = [
     "EscalationReason",
     "EscalationReport",
     "FailureItem",
+    "ReplayCheck",
+    "ReplayReport",
+    "ReplayStatus",
     "RoundReport",
     "StageKind",
     "StageReport",

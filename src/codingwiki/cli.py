@@ -463,6 +463,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coding_run_parser.set_defaults(handler=_cmd_coding_run)
 
+    coding_replay_parser = coding_subcommands.add_parser(
+        "replay", help="用快照+补丁重放并对比阶段结果（S24）"
+    )
+    coding_replay_parser.add_argument("--run", required=True, help="run.json 路径")
+    coding_replay_parser.add_argument("--repo", required=True, help="仓库 ID")
+    coding_replay_parser.add_argument("--spec-dir", required=True, help="approved Spec 目录")
+    coding_replay_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    coding_replay_parser.set_defaults(handler=_cmd_coding_replay)
+
     return parser
 
 
@@ -1434,6 +1443,43 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
 
 def _stage_line(item: StageReport) -> str:
     return f"{item.kind.value}:{item.status.value}"
+
+
+def _cmd_coding_replay(args: argparse.Namespace) -> int:
+    from typing import cast
+
+    from codingwiki.coding import decompose, load_approved_spec, replay_run
+    from codingwiki.domain.coding import CodingRun, ReplayStatus
+    from codingwiki.patch import WorkspaceManager
+    from codingwiki.patch.protocol import WorktreeGit
+
+    run_path = Path(args.run)
+    if not run_path.is_file():
+        raise InputError(f"运行文件不存在：{run_path}")
+    try:
+        run = CodingRun.model_validate_json(run_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InputError(f"运行文件不可读：{run_path}: {exc}") from exc
+
+    repo = load_repo_config(os.path.join(args.config_dir, f"{args.repo}.yaml"))
+    spec = load_approved_spec(args.spec_dir)
+    task = next((item for item in decompose(spec) if item.id == run.task_id), None)
+    if task is None:
+        raise InputError(f"Spec {spec.spec_id} 中没有任务 {run.task_id}")
+
+    provider = cast("WorktreeGit", create_provider(repo.provider))
+    report = replay_run(provider, WorkspaceManager(provider), repo, spec, task, run)
+    matched = sum(1 for item in report.checks if item.matched)
+    print(
+        f"重放: status={report.status.value} stages={matched}/{len(report.checks)}"
+        f" patch={report.patch_sha256[:12]}"
+    )
+    if report.message:
+        print(f"说明: {report.message}")
+    print(f"结果: {run_path.parent / 'replay.json'}")
+    return (
+        int(ExitCode.OK) if report.status is ReplayStatus.REPRODUCED else int(ExitCode.ENVIRONMENT)
+    )
 
 
 def _app_config_or_default(path: str) -> AppConfig:

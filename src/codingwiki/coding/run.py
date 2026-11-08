@@ -118,7 +118,7 @@ def run_task(
     sink = AuditSink(audit_path)
     runner = AuditRunner(runner or LocalCommandRunner(), sink)
 
-    baseline = _run_stages(pairs, runner)
+    baseline = run_stages(pairs, runner)
     if any(item.status is not StageStatus.OK for item in baseline):
         failed = next(item for item in baseline if item.status is not StageStatus.OK)
         baseline_errors = _errors_of(baseline)
@@ -194,7 +194,7 @@ def run_task(
             stop_message = _guard_message(guard.findings)
             round_message = stop_message
         else:
-            stages = _run_stages(pairs, runner)
+            stages = run_stages(pairs, runner)
             _write_models(round_dir / "stages.json", stages)
             failed_stage = next(
                 (item for item in stages if item.status is not StageStatus.OK), None
@@ -362,7 +362,7 @@ def _finish_run(
     return run
 
 
-def _run_stages(
+def run_stages(
     pairs: list[tuple[StageKind, CommandSpec]], runner: CommandRunner
 ) -> list[StageReport]:
     """顺序执行；首个失败即停（编译失败就不跑测试）。"""
@@ -432,4 +432,4 @@ def _assert_revision(snapshot_id: str, base_revision: str) -> None:
         raise InputError(f"Spec 快照 {snapshot_id} 与工作区基线 {base_revision} 不一致")
 
 
-__all__ = ["load_approved_spec", "run_task"]
+__all__ = ["load_approved_spec", "run_stages", "run_task"]

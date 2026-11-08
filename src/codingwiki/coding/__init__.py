@@ -6,6 +6,7 @@ from codingwiki.coding.audit import AuditRunner, AuditSink, assert_command_allow
 from codingwiki.coding.backend import load_backend_config, run_backend
 from codingwiki.coding.escalate import build_escalation, escalation_reason, render_escalation
 from codingwiki.coding.packet import build_packet
+from codingwiki.coding.replay import replay_run
 from codingwiki.coding.run import load_approved_spec, run_task
 from codingwiki.coding.tasks import decompose
 from codingwiki.coding.verify import mechanical_report, verify_patch
@@ -23,6 +24,7 @@ __all__ = [
     "load_backend_config",
     "mechanical_report",
     "render_escalation",
+    "replay_run",
     "run_backend",
     "run_task",
     "verify_patch",
