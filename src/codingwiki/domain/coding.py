@@ -329,6 +329,67 @@ class ReplayReport(_WikiModel):
     created_at: datetime
 
 
+class RunMetrics(_WikiModel):
+    """一次运行的计量指标（开发计划 14.11）；只统计已计量命令。"""
+
+    succeeded: bool
+    first_pass: bool = False
+    rounds: int = Field(default=0, ge=0)
+    max_rounds: int = Field(default=1, ge=1)
+    backend_duration_ms: int = Field(default=0, ge=0)
+    stage_duration_ms: int = Field(default=0, ge=0)
+    total_duration_ms: int = Field(default=0, ge=0)
+    tokens_in: int = Field(default=0, ge=0)
+    tokens_out: int = Field(default=0, ge=0)
+    baseline_failures: int = Field(default=0, ge=0)
+    final_failures: int = Field(default=0, ge=0)
+    guard_rejected: bool = False
+    verifier_rejected: bool = False
+    regression: bool = False
+    escalated: bool = False
+
+
+class RunReport(_WikiModel):
+    """一次运行的指标报告（runs/<run_id>/report.json）。"""
+
+    run_id: str = Field(pattern=r"^RUN-[A-Za-z0-9._-]+$")
+    repo_id: str = Field(min_length=1)
+    spec_id: str = Field(pattern=r"^F-\d{3}$")
+    task_id: str = Field(pattern=r"^T-\d{3}$")
+    status: CodingRunStatus
+    stop_reason: CodingStopReason
+    metrics: RunMetrics
+    created_at: datetime
+
+
+class CodingStats(_WikiModel):
+    """跨运行汇总（coding report）：成功率、一次通过率、平均轮次与耗时。"""
+
+    runs: int = Field(default=0, ge=0)
+    succeeded: int = Field(default=0, ge=0)
+    first_pass: int = Field(default=0, ge=0)
+    guard_rejected: int = Field(default=0, ge=0)
+    verifier_rejected: int = Field(default=0, ge=0)
+    regression: int = Field(default=0, ge=0)
+    escalated: int = Field(default=0, ge=0)
+    total_rounds: int = Field(default=0, ge=0)
+    total_duration_ms: int = Field(default=0, ge=0)
+    tokens_in: int = Field(default=0, ge=0)
+    tokens_out: int = Field(default=0, ge=0)
+
+    @property
+    def success_rate(self) -> float:
+        return self.succeeded / self.runs if self.runs else 0.0
+
+    @property
+    def first_pass_rate(self) -> float:
+        return self.first_pass / self.runs if self.runs else 0.0
+
+    @property
+    def avg_rounds(self) -> float:
+        return self.total_rounds / self.runs if self.runs else 0.0
+
+
 class CodingRun(_WikiModel):
     """一次编码运行（runs/<run_id>/run.json）。"""
 
@@ -363,6 +424,7 @@ __all__ = [
     "CodedTask",
     "CodingRun",
     "CodingRunStatus",
+    "CodingStats",
     "CodingStopReason",
     "CommandAuditEntry",
     "ContextFile",
@@ -374,6 +436,8 @@ __all__ = [
     "ReplayReport",
     "ReplayStatus",
     "RoundReport",
+    "RunMetrics",
+    "RunReport",
     "StageKind",
     "StageReport",
     "StageStatus",

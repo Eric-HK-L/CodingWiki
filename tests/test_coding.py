@@ -35,6 +35,7 @@ from codingwiki.coding import (
 )
 from codingwiki.coding.commands import split_command, stage_specs
 from codingwiki.coding.errors import parse_failures
+from codingwiki.coding.metrics import aggregate
 from codingwiki.config import load_repo_config
 from codingwiki.domain.coding import (
     BackendConfig,
@@ -46,6 +47,8 @@ from codingwiki.domain.coding import (
     EscalationReason,
     EscalationReport,
     ReplayStatus,
+    RunMetrics,
+    RunReport,
     StageKind,
     StageReport,
     StageStatus,
@@ -1775,3 +1778,160 @@ def test_cli_replay_reproduces(
     assert rc == 0, captured.err
     assert "重放: status=reproduced stages=1/1" in captured.out
     assert "结果: " in captured.out
+
+
+# ---------------------------------------------------------------- S25 指标
+
+
+TOKEN_BACKEND = """\
+import json
+import sys
+from pathlib import Path
+
+workspace = Path(sys.argv[2])
+target = workspace / "nvlog/src/nvlog.c"
+target.write_text(target.read_text(encoding="utf-8") + "int level = 1;" + chr(10), encoding="utf-8")
+result_path = Path(sys.argv[3])
+result_path.write_text(
+    json.dumps({"status": "ok", "summary": "done", "tokens_in": 120, "tokens_out": 30}),
+    encoding="utf-8",
+)
+print("backend ok")
+"""
+
+
+def _report_of(env: CodingEnv, run_id: str) -> RunReport:
+    path = _run_dir(env, run_id) / "report.json"
+    return RunReport.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def test_run_writes_report_with_metrics(env: CodingEnv, tmp_path: Path) -> None:
+    run, _worktree = _run_with_runner(env, tmp_path, FakeRunner([]))
+
+    report = _report_of(env, run.run_id)
+
+    assert report.status is CodingRunStatus.SUCCEEDED
+    assert report.stop_reason is CodingStopReason.SUCCEEDED
+    assert report.metrics.succeeded
+    assert report.metrics.first_pass
+    assert report.metrics.rounds == 1
+    assert report.metrics.total_duration_ms == (
+        report.metrics.backend_duration_ms + report.metrics.stage_duration_ms
+    )
+    assert not report.metrics.regression
+    assert not report.metrics.escalated
+
+
+def test_report_marks_regression_and_escalation(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner(
+        [
+            _result(),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+        ]
+    )
+    run, _worktree = _run_with_runner(env, tmp_path, runner, max_rounds=2)
+
+    report = _report_of(env, run.run_id)
+
+    assert report.status is CodingRunStatus.FAILED
+    assert report.stop_reason is CodingStopReason.NO_PROGRESS
+    assert report.metrics.regression
+    assert report.metrics.escalated
+    assert report.metrics.baseline_failures == 0
+    assert report.metrics.final_failures == 1
+
+
+def test_report_baseline_failure_is_not_regression(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    run, _worktree = _run_with_runner(
+        env, tmp_path, FakeRunner([_result(CommandStatus.FAILED, stderr=GCC_ERROR)])
+    )
+
+    report = _report_of(env, run.run_id)
+
+    assert report.stop_reason is CodingStopReason.BASELINE_FAILED
+    assert report.metrics.rounds == 0
+    assert report.metrics.baseline_failures == 1
+    assert not report.metrics.regression
+    assert report.metrics.escalated
+    assert not report.metrics.first_pass
+
+
+def test_report_sums_backend_tokens(env: CodingEnv, tmp_path: Path) -> None:
+    run, _worktree = _run_with_runner(env, tmp_path, FakeRunner([]), body=TOKEN_BACKEND)
+
+    report = _report_of(env, run.run_id)
+
+    assert report.metrics.tokens_in == 120
+    assert report.metrics.tokens_out == 30
+
+
+def test_aggregate_counts_runs() -> None:
+    created = datetime(2026, 1, 1, tzinfo=UTC)
+    reports = [
+        RunReport(
+            run_id="RUN-DEMO-A",
+            repo_id="demo",
+            spec_id="F-101",
+            task_id="T-001",
+            status=CodingRunStatus.SUCCEEDED,
+            stop_reason=CodingStopReason.SUCCEEDED,
+            metrics=RunMetrics(
+                succeeded=True,
+                first_pass=True,
+                rounds=1,
+                total_duration_ms=100,
+                tokens_in=10,
+                tokens_out=5,
+            ),
+            created_at=created,
+        ),
+        RunReport(
+            run_id="RUN-DEMO-B",
+            repo_id="demo",
+            spec_id="F-101",
+            task_id="T-001",
+            status=CodingRunStatus.FAILED,
+            stop_reason=CodingStopReason.ROUNDS_EXHAUSTED,
+            metrics=RunMetrics(
+                succeeded=False,
+                rounds=2,
+                total_duration_ms=200,
+                tokens_in=20,
+                tokens_out=10,
+                regression=True,
+                escalated=True,
+            ),
+            created_at=created,
+        ),
+    ]
+
+    stats = aggregate(reports)
+
+    assert stats.runs == 2
+    assert stats.succeeded == 1
+    assert stats.first_pass == 1
+    assert stats.regression == 1
+    assert stats.escalated == 1
+    assert stats.total_rounds == 3
+    assert stats.total_duration_ms == 300
+    assert stats.tokens_in == 30
+    assert stats.success_rate == 0.5
+    assert stats.avg_rounds == 1.5
+
+
+def test_cli_report_aggregates(
+    env: CodingEnv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run, _worktree = _run_with_runner(env, tmp_path, FakeRunner([]))
+    spec_dir = _write_spec_dir(tmp_path / "specs", snapshot_id=f"demo@{env.rev}")
+
+    rc = main(["coding", "report", "--repo", "demo", "--spec-dir", str(spec_dir)])
+    captured = capsys.readouterr()
+
+    assert rc == 0, captured.err
+    assert "统计: runs=1 成功=1（100%）" in captured.out
+    assert "一次通过=1（100%）" in captured.out
+    assert f"运行: {run.run_id} status=succeeded" in captured.out
