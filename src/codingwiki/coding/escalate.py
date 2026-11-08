@@ -38,6 +38,7 @@ _STOP_REASONS: dict[CodingStopReason, EscalationReason] = {
     CodingStopReason.TIME_EXCEEDED: EscalationReason.BUDGET_EXCEEDED,
     CodingStopReason.TOKEN_EXCEEDED: EscalationReason.BUDGET_EXCEEDED,
     CodingStopReason.DIFF_GROWING: EscalationReason.DIFF_GROWING,
+    CodingStopReason.FLAKY_BASELINE: EscalationReason.FLAKY_TESTS,
 }
 
 _DECISIONS: dict[EscalationReason, tuple[str, ...]] = {
@@ -82,6 +83,10 @@ _DECISIONS: dict[EscalationReason, tuple[str, ...]] = {
     EscalationReason.DIFF_GROWING: (
         "判断模型是否在反复重写而非收敛",
         "决定重新规划任务还是人工接管",
+    ),
+    EscalationReason.FLAKY_TESTS: (
+        "确认关键测试不稳定的根因（时序/资源/数据）",
+        "决定先修测试、扩大隔离范围还是暂停自动编码",
     ),
 }
 
@@ -135,6 +140,11 @@ _STEPS: dict[EscalationReason, tuple[str, ...]] = {
         "对比相邻轮次 check.json 的 diff 规模",
         "回滚工作区并按更小任务重试",
         "若属正常增量，调高 diff-growth-rounds",
+    ),
+    EscalationReason.FLAKY_TESTS: (
+        "查看基线 stages.json 中标记的 flaky 用例",
+        "修复测试或调整 critical_tests 配置后重跑",
+        "不要通过跳过测试绕过不稳定用例",
     ),
 }
 
@@ -259,6 +269,15 @@ def _failures(run: CodingRun) -> list[EscalationFailure]:
             )
             for stage in run.baseline
             if stage.status is not StageStatus.OK
+        )
+    if run.stop_reason in {CodingStopReason.BASELINE_FAILED, CodingStopReason.FLAKY_BASELINE}:
+        items.extend(
+            EscalationFailure(
+                source="baseline",
+                code="test.flaky",
+                message=f"不稳定测试：{ident}",
+            )
+            for ident in run.quarantined_tests
         )
     items.extend(
         EscalationFailure(source="guard", code=item.code, message=item.message, file=item.path)

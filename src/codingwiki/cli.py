@@ -1454,6 +1454,8 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
             print(f"验证问题: [{item.code}] {location} {item.message}")
     if run.baseline:
         print(f"基线: {' '.join(_stage_line(item) for item in run.baseline)}")
+    if run.quarantined_tests:
+        print(f"隔离测试: {', '.join(run.quarantined_tests[:5])}")
     if run.stages:
         print(f"阶段: {' '.join(_stage_line(item) for item in run.stages)}")
     if run.message:
@@ -1463,7 +1465,8 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
     if metrics.tests_parsed:
         print(
             f"测试: 新增失败={metrics.new_failures} 原有失败={metrics.pre_existing_failures} "
-            f"跳过={metrics.skipped_tests}"
+            f"跳过={metrics.skipped_tests} 不稳定={metrics.flaky_tests} "
+            f"隔离={metrics.quarantined_tests}"
         )
     for failure in [entry for entry in run.errors if entry.code.startswith("test:")][:5]:
         print(f"失败测试: {failure.code[len('test:') :]} {failure.message[:120]}")

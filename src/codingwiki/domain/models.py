@@ -42,6 +42,8 @@ class TestCommands(_DomainModel):
 
     report_format/report_paths 声明测试报告位置（14.5.4）；路径是相对源码根的 glob，
     只允许仓库内相对路径，避免读取仓库外文件。
+    baseline_runs 为基线重复次数（14.7.3 默认 3 次，用于识别不稳定测试）；
+    retries 为用例失败后的重跑次数；critical_tests 是不允许不稳定的测试 id 模式。
     """
 
     fast: str = ""
@@ -49,6 +51,9 @@ class TestCommands(_DomainModel):
     timeout_s: int = Field(default=3600, ge=1, le=86_400)
     report_format: Literal["", "junit"] = ""
     report_paths: list[str] = Field(default_factory=list)
+    baseline_runs: int = Field(default=3, ge=1, le=5)
+    retries: int = Field(default=2, ge=0, le=5)
+    critical_tests: list[str] = Field(default_factory=list)
 
     @field_validator("report_paths")
     @classmethod
@@ -60,6 +65,13 @@ class TestCommands(_DomainModel):
             path = Path(text)
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError(f"report_paths 只允许仓库内相对路径：{text}")
+        return value
+
+    @field_validator("critical_tests")
+    @classmethod
+    def _critical_tests_patterns(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("critical_tests 不能包含空模式")
         return value
 
 
