@@ -128,6 +128,21 @@ def test_gate_passes_internal_links(store: FilesystemPageStore) -> None:
     assert len(index.pages) == 2
 
 
+def test_prune_drafts_removes_pages_outside_plan(store: FilesystemPageStore) -> None:
+    _stage(store, PAGE)
+    _stage(store, PAGE.replace("module/src", "module/old"), "module/old")
+    removed = store.prune_drafts({"module/src"})
+    assert removed == ["module/old"]
+    assert store.list_drafts() == ["module/src"]
+    assert store.load_draft("module/old") is None
+
+
+def test_gate_enforces_s17_page_caps() -> None:
+    payload = [(f"interface/d{index}", "---\n---\n正文。\n", "{}") for index in range(101)]
+    errors = check_gate(payload)
+    assert any("interface" in error and "上限" in error for error in errors)
+
+
 def test_publish_rejects_tampered_draft(store: FilesystemPageStore, tmp_path: Path) -> None:
     _stage(store, PAGE)
     # 通过校验后篡改草稿正文 → 发布门禁复算哈希不一致，拒绝发布

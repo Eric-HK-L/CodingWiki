@@ -35,8 +35,8 @@ if TYPE_CHECKING:
 _INTERNAL_LINK = re.compile(
     r"\[[^\]]*\]\(((?:module|interface|flow|config|build|test|overview|home|architecture|glossary|howto|adr|file)/[^)\s]+)\)"
 )
-_PAGE_TYPE_CAPS = {"module": 60, "interface": 30, "flow": 15}
-_MAX_PAGES = 120
+_PAGE_TYPE_CAPS = {"module": 60, "interface": 100, "flow": 120}
+_MAX_PAGES = 300
 
 
 class FilesystemPageStore:
@@ -90,6 +90,19 @@ class FilesystemPageStore:
         if not path.is_file():
             return None
         return TaskMeta.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def remove_draft(self, page_id: str) -> None:
+        """删除草稿页的全部文件（S17：接口页 ID 迁移后清理旧页）。"""
+        stem = self._stem(page_id)
+        for suffix in (".md", ".result.json", ".verify.json", ".meta.json", ".deps.json"):
+            stem.with_suffix(suffix).unlink(missing_ok=True)
+
+    def prune_drafts(self, keep: set[str]) -> list[str]:
+        """删除不在保留集合内的草稿页，返回被删除的 page_id。"""
+        removed = [page_id for page_id in self.list_drafts() if page_id not in keep]
+        for page_id in removed:
+            self.remove_draft(page_id)
+        return removed
 
     def load_deps(self) -> dict[str, PageDeps]:
         pages = self._drafts / "pages"

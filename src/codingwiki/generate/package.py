@@ -509,11 +509,14 @@ def _select_module(task: PageTask, facts: RepoFacts) -> TaskFacts:
 
 
 def _select_interface(task: PageTask, facts: RepoFacts) -> TaskFacts:
-    file = next((item for item in facts.files if item.path == task.scope), None)
-    if file is None:
+    files = [item for item in facts.files if _parent_dir(item.path) == task.scope]
+    if not files:
+        # 兼容旧计划：scope 直接指向单个文件
+        files = [item for item in facts.files if item.path == task.scope]
+    if not files:
         return TaskFacts()
     degrees = call_degrees(facts)
-    public = [symbol for symbol in file.symbols if is_public_symbol(symbol)]
+    public = [symbol for file in files for symbol in file.symbols if is_public_symbol(symbol)]
     symbols = rank_symbols(public, degrees, _MAX_SYMBOLS)
     top_ids = {symbol.symbol_id for symbol in symbols}
     calls = _callers_of(top_ids, facts)[:_MAX_CALLS]
@@ -521,12 +524,13 @@ def _select_interface(task: PageTask, facts: RepoFacts) -> TaskFacts:
     stats = {
         "public_symbols": len(public),
         "incoming_calls": sum(degrees.get(symbol.symbol_id, 0) for symbol in symbols),
-        "lines": file.line_count,
-        "is_header": int(is_header(file.path)),
+        "lines": sum(file.line_count for file in files),
+        "files": len(files),
+        "headers": sum(1 for file in files if is_header(file.path)),
     }
     return TaskFacts(
-        module=file.module,
-        files=[_file_summary(file, file.module)],
+        module=files[0].module,
+        files=[_file_summary(file, file.module) for file in files[:_MAX_FILES]],
         symbols=symbols,
         calls=calls,
         terms=terms,
@@ -674,6 +678,10 @@ _SELECTORS = {
 
 
 # ---------------------------------------------------------------- 辅助
+
+
+def _parent_dir(path: str) -> str:
+    return path.rsplit("/", 1)[0] if "/" in path else "."
 
 
 def _file_summary(file: FileFacts, module: str) -> FileSummary:

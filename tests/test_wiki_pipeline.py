@@ -79,8 +79,8 @@ def test_plan_covers_page_types(home: Path, work: Path) -> None:
     page_ids = {t.page_id for t in plan.tasks}
     assert "module/src" in page_ids
     assert "overview" in page_ids
-    assert "interface/src/engine" in page_ids
-    assert not any("/" in pid.split("interface/", 1)[-1] and pid.count("/") > 2 for pid in page_ids)
+    assert "interface/src" in page_ids
+    assert not any(pid.startswith("interface/src/engine.h") for pid in page_ids)
 
 
 def test_plan_max_tasks_truncates(home: Path, work: Path) -> None:
@@ -219,7 +219,21 @@ def test_incremental_reuse_unchanged_pages(home: Path, work: Path) -> None:
     # tests/test_sample.py 变化的页面需要重生成；src 模块页复用
     assert "test/overview" in fresh
     assert "module/tests" in fresh
-    assert {"module/src", "flow/src/main", "interface/src/engine"} <= reused
+    assert {"module/src", "flow/src/main", "interface/src"} <= reused
+
+
+def test_page_deps_register_task_scope(home: Path, work: Path) -> None:
+    """S17 §15.3：模块/接口/流程页的 deps 覆盖任务作用域，供 C1 统计与 stale 判定。"""
+    facts = _facts(home, work)
+    store = FilesystemPageStore("sample")
+    plan, pipeline = _pipeline(work, facts, store)
+    assert all(o.ok for o in pipeline.run_plan(plan, facts))
+    deps = store.load_deps()
+
+    src_files = {file.path for file in facts.files if file.module == "src"}
+    assert src_files <= set(deps["module/src"].files)
+    assert {"src/engine.h", "src/helper.c", "src/main.cu"} <= set(deps["interface/src"].files)
+    assert "src/main.cu" in deps["flow/src/main"].files
 
 
 def test_empty_facts_plan_is_empty(home: Path, work: Path) -> None:

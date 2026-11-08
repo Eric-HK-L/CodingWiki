@@ -102,11 +102,14 @@ def test_plan_uses_directory_modules_not_symbols() -> None:
     flows = [task for task in plan.tasks if task.page_type is PageType.FLOW]
 
     assert len(modules) <= 60
-    assert len(interfaces) <= 30
-    assert len(flows) <= 15
+    assert len(interfaces) <= 100
+    assert len(flows) <= 120
     # 160 个符号只产生目录级模块页，不再一个符号一页
     assert len(modules) < len(facts.files)
     assert any(task.rollup for task in modules)
+    # S17：接口页按目录聚合，80 个目录覆盖 95% 公开符号 → 76 页
+    assert len(interfaces) == 76
+    assert all(task.scope.startswith("src/pkg") for task in interfaces)
 
 
 def test_plan_fixture_page_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,9 +130,12 @@ def test_plan_fixture_page_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     assert "module/src" in page_ids
     assert "module/tests" in page_ids
-    assert "interface/src/engine" in page_ids
-    assert not any(page_id.startswith("interface/src/engine.h/") for page_id in page_ids)
-    assert len(plan.tasks) <= 120
+    assert "interface/src" in page_ids
+    assert not any(page_id.startswith("interface/src/engine.h") for page_id in page_ids)
+    # S17：流程页覆盖全部入口目录（src 与 tests），页面总量上限放宽到 300
+    assert "flow/src/main" in page_ids
+    assert "flow/tests/test_sample" in page_ids
+    assert len(plan.tasks) <= 300
 
 
 def test_rank_symbols_prefers_called_symbol() -> None:

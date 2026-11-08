@@ -80,9 +80,16 @@ def build_current_dashboard(
 def _coverage_rows(
     facts: RepoFacts, c1_files: set[str], interface_files: set[str], flow_files: set[str]
 ) -> list[CoverageRow]:
-    """按 FileFacts.module 分组的模块行 + total 行（架构 §19.2 口径）。"""
+    """按 FileFacts.module 分组的模块行 + total 行（架构 §19.2 口径）。
+
+    同路径重复的 FileFacts 只计一次，否则 C1/C2 分母被重复条目抬高。
+    """
     by_module: dict[str, list[FileFacts]] = {}
+    seen: set[str] = set()
     for file in facts.files:
+        if file.path in seen:
+            continue
+        seen.add(file.path)
         by_module.setdefault(file.module, []).append(file)
 
     rows = [

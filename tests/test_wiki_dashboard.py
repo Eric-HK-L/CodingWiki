@@ -186,6 +186,20 @@ def test_build_dashboard_matrix_known_values(
     )
 
 
+def test_coverage_dedupes_duplicate_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S17：同路径重复 FileFacts 不得抬高 C1/C2 分母。"""
+    monkeypatch.setenv("CODINGWIKI_HOME", str(tmp_path / ".cw"))
+    facts = _facts()
+    duplicated = facts.model_copy(update={"files": [*facts.files, facts.files[0]]})
+    index, deps = _index_and_deps()
+
+    data = build_dashboard("demo", duplicated, index, deps)
+
+    total = next(row for row in data.coverage if row.module == "total")
+    assert total.files_total == 4
+    assert total.public_total == 3
+
+
 def test_build_dashboard_entry_dedupe_prefers_main(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
