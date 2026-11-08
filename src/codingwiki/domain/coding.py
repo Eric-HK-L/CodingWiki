@@ -246,6 +246,20 @@ class RoundReport(_WikiModel):
     message: str = ""
 
 
+class CommandAuditEntry(_WikiModel):
+    """一条命令执行审计（<run>/audit/commands.jsonl，开发计划 14.9）。"""
+
+    seq: int = Field(ge=1)
+    kind: str = Field(min_length=1)  # stage:<kind> / backend / verifier
+    argv: list[str] = Field(min_length=1)
+    cwd: str = ""
+    status: str = Field(min_length=1)
+    exit_code: int
+    duration_ms: int = Field(default=0, ge=0)
+    started_at: datetime
+    error: str = ""
+
+
 class EscalationFailure(_WikiModel):
     """升级单里的一条失败/拦截项；来源不限于某个构建阶段。"""
 
@@ -293,6 +307,7 @@ class CodingRun(_WikiModel):
     max_rounds: int = Field(default=1, ge=1)
     packet_dir: str = ""
     escalation_path: str = ""
+    audit_path: str = ""
     backend: BackendResult | None = None
     guard: PatchReport | None = None
     baseline: list[StageReport] = Field(default_factory=list)
@@ -312,6 +327,7 @@ __all__ = [
     "CodingRun",
     "CodingRunStatus",
     "CodingStopReason",
+    "CommandAuditEntry",
     "ContextFile",
     "EscalationFailure",
     "EscalationReason",

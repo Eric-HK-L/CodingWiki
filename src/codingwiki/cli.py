@@ -1361,6 +1361,7 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
     from typing import cast
 
     from codingwiki.coding import load_approved_spec, load_backend_config, run_task
+    from codingwiki.coding.audit import audit_count
     from codingwiki.domain.coding import CodingRunStatus, EscalationReport
     from codingwiki.patch import WorkspaceManager
     from codingwiki.patch.protocol import WorktreeGit
@@ -1423,6 +1424,8 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
         print(f"升级摘要: {escalation.summary}")
         for decision in escalation.decisions[:3]:
             print(f"待决定: {decision}")
+    if run.audit_path:
+        print(f"审计: {run.audit_path}（{audit_count(run.audit_path)} 条）")
     print(f"结果: {run_path}")
     return (
         int(ExitCode.OK) if run.status is CodingRunStatus.SUCCEEDED else int(ExitCode.ENVIRONMENT)

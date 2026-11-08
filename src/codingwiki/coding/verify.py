@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from codingwiki.coding.audit import AuditSink
 from codingwiki.coding.backend import run_command_backend
 from codingwiki.domain.coding import (
     BackendConfig,
@@ -203,6 +204,7 @@ def verify_patch(
     log_path: Path,
     *,
     now: datetime | None = None,
+    audit: AuditSink | None = None,
 ) -> VerifierReport:
     """机械检查 +（可选）外部评审；产物写 packet_dir/verification-request.json。"""
     diff = provider.diff_unified(workspace, patch.base_revision)
@@ -229,7 +231,16 @@ def verify_patch(
     if config is None:
         return mechanical
 
-    result = run_command_backend(config, str(packet_dir), workspace, result_path, log_path, now=now)
+    result = run_command_backend(
+        config,
+        str(packet_dir),
+        workspace,
+        result_path,
+        log_path,
+        now=now,
+        audit=audit,
+        role="verifier",
+    )
     external = _external_report(result)
     return _combine(mechanical, external)
 

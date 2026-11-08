@@ -12,6 +12,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from codingwiki.coding.audit import AuditRunner, AuditSink, assert_command_allowed
 from codingwiki.coding.backend import run_backend
 from codingwiki.coding.commands import stage_specs
 from codingwiki.coding.errors import parse_failures, timeout_failure
@@ -102,12 +103,20 @@ def run_task(
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%d%H%M%S")
     run_id = f"RUN-{task.id}-{stamp}"
     run_dir = manager.home / "coding" / repo.repo_id / spec.spec_id / task.id / "runs" / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     policy = PatchPolicy(allowed_paths=task.files_allowed)
     source_root = workspace / record.root if record.root else workspace
     pairs = stage_specs(repo, workspace_root=source_root)
-    runner = runner or LocalCommandRunner()
+    for kind, stage_spec in pairs:
+        assert_command_allowed(stage_spec.argv, source=f"阶段 {kind.value}")
+    assert_command_allowed(config.command, source="编码后端")
+    if verifier is not None:
+        assert_command_allowed(verifier.command, source="验证后端")
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = run_dir / "audit" / "commands.jsonl"
+    sink = AuditSink(audit_path)
+    runner = AuditRunner(runner or LocalCommandRunner(), sink)
 
     baseline = _run_stages(pairs, runner)
     if any(item.status is not StageStatus.OK for item in baseline):
@@ -129,6 +138,7 @@ def run_task(
             baseline=baseline,
             message=f"基线未通过：{failed.kind.value}（exit {failed.exit_code}），拒绝交给模型",
             now=now,
+            audit_path=str(audit_path),
         )
         return _finish_run(run_dir, run, spec, task, now=now)
 
@@ -164,6 +174,7 @@ def run_task(
             workspace,
             round_dir / "result.json",
             round_dir / "backend.log",
+            audit=sink,
         )
         guard = check_workspace(provider, record, policy, manager, now=now)
         _write_model(round_dir / "check.json", guard)
@@ -204,6 +215,7 @@ def run_task(
                         verify_dir / "result.json",
                         verify_dir / "backend.log",
                         now=now,
+                        audit=sink,
                     )
                     final_verifier = round_verifier
                     _write_model(round_dir / "verification.json", round_verifier)
@@ -273,6 +285,7 @@ def run_task(
         round_reports=reports,
         message=stop_message,
         now=now,
+        audit_path=str(audit_path),
     )
     return _finish_run(run_dir, run, spec, task, now=now)
 
@@ -298,6 +311,7 @@ def _build_run(
     errors: list[FailureItem] | None = None,
     verifier: VerifierReport | None = None,
     round_reports: list[RoundReport] | None = None,
+    audit_path: str = "",
     now: datetime | None = None,
 ) -> CodingRun:
     return CodingRun(
@@ -312,6 +326,7 @@ def _build_run(
         rounds=rounds,
         max_rounds=max_rounds,
         packet_dir=packet_dir,
+        audit_path=audit_path,
         backend=backend,
         guard=guard,
         baseline=baseline,

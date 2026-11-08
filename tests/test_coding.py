@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import sys
 from collections.abc import Generator
@@ -19,6 +20,8 @@ import yaml
 
 from codingwiki.cli import main
 from codingwiki.coding import (
+    assert_command_allowed,
+    audit_count,
     build_escalation,
     build_packet,
     decompose,
@@ -1544,3 +1547,146 @@ def test_cli_coding_run_prints_escalation(
     assert "升级: " in captured.out
     assert "原因=backend_failed" in captured.out
     assert "待决定: 检查模型后端进程、凭据与超时配置" in captured.out
+
+
+# ---------------------------------------------------------------- S23 命令审计
+
+
+def _audit_entries(run: CodingRun) -> list[dict[str, object]]:
+    assert run.audit_path, "每次运行都应写审计"
+    path = Path(run.audit_path)
+    assert path.is_file()
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert audit_count(path) == len(lines)
+    return [json.loads(line) for line in lines]
+
+
+def test_assert_command_allowed_blocks_destructive() -> None:
+    for argv in (
+        ["rm", "-rf", "/"],
+        ["bash", "-lc", "rm -rf build"],
+        ["sudo", "make"],
+        ["git", "push", "origin", "main"],
+        ["git", "reset", "--hard", "HEAD~1"],
+        ["mkfs.ext4", "/dev/sda1"],
+    ):
+        with pytest.raises(InputError, match="拒绝执行危险命令"):
+            assert_command_allowed(argv, source="test")
+
+    assert_command_allowed(["cmake", "--build", "build", "-j", "8"], source="test")
+    assert_command_allowed(["pytest", "-q"], source="test")
+
+
+def test_forbidden_stage_command_rejected(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, 'commands:\n  build:\n    compile: "rm -rf /"\n')
+
+    with pytest.raises(InputError, match="递归强制删除"):
+        _run(env, tmp_path, SUCCESS_BACKEND)
+
+
+def test_forbidden_backend_command_rejected(env: CodingEnv, tmp_path: Path) -> None:
+    repo, manager, _worktree, spec, task = _setup(env)
+    config = BackendConfig(kind="command", command=["sudo", "python"], timeout_seconds=30)
+
+    with pytest.raises(InputError, match="提权"):
+        run_task(GitProvider(), manager, repo, spec, task, config)
+
+
+def test_audit_records_stage_commands(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner([_result(), _result()])
+    run, _worktree = _run_with_runner(env, tmp_path, runner)
+
+    entries = _audit_entries(run)
+    assert [entry["kind"] for entry in entries] == ["stage:compile", "backend", "stage:compile"]
+    assert [entry["seq"] for entry in entries] == [1, 2, 3]
+    assert all(entry["status"] == "ok" and entry["exit_code"] == 0 for entry in entries)
+    assert run.audit_path.endswith("audit/commands.jsonl")
+
+
+def test_audit_records_backend_and_verifier(env: CodingEnv, tmp_path: Path) -> None:
+    run, _worktree = _run_with_verifier(env, tmp_path, VERIFIER_PASS)
+
+    entries = _audit_entries(run)
+    assert [entry["kind"] for entry in entries] == [
+        "stage:compile",
+        "backend",
+        "stage:compile",
+        "verifier",
+    ]
+    assert entries[1]["argv"][1].endswith("backend.py")
+    assert entries[3]["argv"][1].endswith("verifier.py")
+
+
+def test_audit_records_failed_stage(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, COMPILE_ONLY)
+    runner = FakeRunner(
+        [
+            _result(),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+            _result(CommandStatus.FAILED, stderr=GCC_ERROR),
+        ]
+    )
+    run, _worktree = _run_with_runner(env, tmp_path, runner, max_rounds=2)
+
+    entries = _audit_entries(run)
+    assert len(entries) == 5
+    assert entries[-1]["status"] == "failed"
+    assert entries[-1]["exit_code"] == 1
+
+
+def test_failure_run_audit_listed_in_escalation(env: CodingEnv, tmp_path: Path) -> None:
+    run, _worktree = _run_with_verifier(env, tmp_path, VERIFIER_FAIL)
+
+    entries = _audit_entries(run)
+    assert entries[-1]["kind"] == "verifier"
+    assert run.audit_path in _escalation_of(run).artifacts
+
+
+def test_cli_coding_run_prints_audit(
+    env: CodingEnv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup(env)
+    spec_dir = _write_spec_dir(tmp_path / "specs", snapshot_id=f"demo@{env.rev}")
+    backend_path = tmp_path / "backend-audit.yaml"
+    backend_path.write_text(
+        yaml.safe_dump(
+            {
+                "kind": "command",
+                "command": [
+                    sys.executable,
+                    str(_script(tmp_path, SUCCESS_BACKEND, "backend_audit.py")),
+                    "{packet_dir}",
+                    "{workspace}",
+                    "{result_path}",
+                ],
+                "timeout_seconds": 30,
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "coding",
+            "run",
+            "--spec-dir",
+            str(spec_dir),
+            "--task",
+            "T-001",
+            "--backend-config",
+            str(backend_path),
+            "--max-rounds",
+            "1",
+            "--config-dir",
+            str(env.config_dir),
+            "--repo",
+            "demo",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0, captured.err
+    assert "审计: " in captured.out
+    assert "（1 条）" in captured.out
