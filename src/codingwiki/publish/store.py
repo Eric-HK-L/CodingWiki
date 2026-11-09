@@ -31,7 +31,7 @@ from codingwiki.errors import InputError
 
 if TYPE_CHECKING:
     from codingwiki.domain.facts import RepoFacts
-    from codingwiki.publish.github_wiki import WikiTarget
+    from codingwiki.publish.repo_wiki import RepoWikiTarget
 
 _INTERNAL_LINK = re.compile(
     r"\[[^\]]*\]\(((?:module|interface|flow|config|build|test|overview|home|architecture|glossary|howto|adr|file)/[^)\s]+)\)"
@@ -130,13 +130,13 @@ class FilesystemPageStore:
         workdir: Path | None = None,
         site_profile: Mapping[str, object] | None = None,
         facts: RepoFacts | None = None,
-        github_wiki: WikiTarget | None = None,
+        repo_wiki: RepoWikiTarget | None = None,
     ) -> VersionIndex:
         """发布草稿区。传 workdir 时同时生成离线站点，站点成功后才切 current。
 
         传 facts 时额外生成覆盖率看板页 dashboard.html（架构 v0.10 §19）；
         facts 缺失时站点不含看板（存量调用路径不受影响）。
-        传 github_wiki 时额外生成可 push 到 GitHub Wiki 的 ``wiki/`` 目录（S36）。
+        传 repo_wiki 时额外生成 wiki 级 Markdown 文档组 ``wiki/``（S36）。
         """
         page_ids = self.list_drafts()
         if not page_ids:
@@ -225,10 +225,10 @@ class FilesystemPageStore:
                 facts=facts,
             )
 
-        if github_wiki is not None and facts is not None:
-            from codingwiki.publish.github_wiki import build_github_wiki
+        if repo_wiki is not None and facts is not None:
+            from codingwiki.publish.repo_wiki import build_repo_wiki
 
-            build_github_wiki(version_dir, index, payload, facts, github_wiki)
+            build_repo_wiki(version_dir, index, payload, facts, repo_wiki)
 
         (self._root / "current").write_text(version_id, encoding="utf-8")
         return index
@@ -270,7 +270,7 @@ class FilesystemPageStore:
         return pages
 
     def load_published_payload(self, version_id: str | None = None) -> list[tuple[str, str, str]]:
-        """读取发布页原文与 result.json：(page_id, page_text, result_text)，供 GitHub Wiki 导出。"""
+        """读取发布页原文与 result.json：(page_id, page_text, result_text)，供 Repo Wiki 导出。"""
         version = version_id or self.current_version()
         if version is None:
             return []

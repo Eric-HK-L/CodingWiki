@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from codingwiki.domain.eval import EvalReport, QuestionResult
     from codingwiki.domain.job import JobRecord
     from codingwiki.domain.spec import EvidenceBundle, ExtractionResult, Requirement, SpecDocument
-    from codingwiki.publish.github_wiki import WikiTarget
+    from codingwiki.publish.repo_wiki import RepoWikiTarget
     from codingwiki.retrieval import HybridSearcher
     from codingwiki.spec.evidence import WikiPageRef
 
@@ -149,7 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish_parser.set_defaults(handler=_cmd_wiki_publish)
 
     export_parser = wiki_subcommands.add_parser(
-        "export", help="把已发布版本导出为 GitHub Wiki Markdown（S36）"
+        "export", help="把已发布版本导出为 Repo Wiki 文档组：wiki 页面 + RAG 全量语料（S36）"
     )
     export_parser.add_argument("--repo", required=True, help="仓库 ID")
     export_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
@@ -781,7 +781,7 @@ def _cmd_wiki_publish(args: argparse.Namespace) -> int:
         workdir=workdir,
         site_profile=profile,
         facts=facts,
-        github_wiki=_wiki_target(args.repo, args.config_dir, facts.snapshot_id),
+        repo_wiki=_repo_wiki_target(args.repo, args.config_dir, facts.snapshot_id),
     )
     counts = index.status_counts
     version_dir = store.version_dir(index.version_id)
@@ -792,16 +792,16 @@ def _cmd_wiki_publish(args: argparse.Namespace) -> int:
     )
     print(f"站点: {site}（离线打开 index.html，首页 2 次点击可达模块页）")
     print(f"看板: {site.parent / 'dashboard.html'}")
-    print(f"GitHub Wiki: {version_dir / 'wiki'}（可直接覆盖到 <repo>.wiki.git）")
+    print(f"Repo Wiki: {version_dir / 'wiki'}（wiki 页面文档组；全量页面继续作 RAG 语料）")
     return int(ExitCode.OK)
 
 
-def _wiki_target(repo_id: str, config_dir: str, snapshot_id: str) -> WikiTarget:
-    from codingwiki.publish.github_wiki import WikiTarget
+def _repo_wiki_target(repo_id: str, config_dir: str, snapshot_id: str) -> RepoWikiTarget:
+    from codingwiki.publish.repo_wiki import RepoWikiTarget
 
     repo = load_repo_config(os.path.join(config_dir, f"{repo_id}.yaml"))
     revision = snapshot_id.split("@", 1)[-1] or "latest"
-    return WikiTarget.from_repo(repo_id, repo.url, revision, repo.root)
+    return RepoWikiTarget.from_repo(repo_id, repo.url, revision, repo.root)
 
 
 def _cmd_wiki_export(args: argparse.Namespace) -> int:
@@ -819,13 +819,15 @@ def _cmd_wiki_export(args: argparse.Namespace) -> int:
         raise InputError(f"版本 {version} 没有可导出的页面")
 
     facts = load_facts_or_raise(args.repo)
-    target = _wiki_target(args.repo, args.config_dir, index.snapshot_id)
-    from codingwiki.publish.github_wiki import build_github_wiki
+    target = _repo_wiki_target(args.repo, args.config_dir, index.snapshot_id)
+    from codingwiki.publish.repo_wiki import build_repo_wiki
 
-    out = build_github_wiki(store.version_dir(version), index, payload, facts, target)
+    out = build_repo_wiki(store.version_dir(version), index, payload, facts, target)
     print(f"导出完成: version={version}, pages={len(payload)}")
-    print(f"GitHub Wiki: {out}")
-    print(f"提示: 克隆 {target.repo_url}.wiki.git 后，把该目录内容覆盖进去并提交")
+    print(f"Repo Wiki: {out}")
+    print(
+        f"提示: 放 GitHub 可克隆 {target.repo_url}.wiki.git 后覆盖提交；全量页面可直接作 RAG 语料"
+    )
     return int(ExitCode.OK)
 
 

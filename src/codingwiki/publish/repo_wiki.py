@@ -1,14 +1,16 @@
-"""GitHub Wiki 导出（S36）。
+"""Repo Wiki 导出（S36，一阶段：wiki 页面 + RAG 增强）。
 
-把已发布版本的页面转成可直接 push 到 ``<repo>.wiki.git`` 的 Markdown：
+把已发布版本的页面转成 wiki 级 Markdown 文档组，可直接放入 GitHub
+（``<repo>.wiki.git`` 或仓库内 ``docs/``），对标 Qoder repo wiki 的两半能力：
 
-- 去掉 front matter、行内 ``[E#]`` 与机器格式的「出处」段；
-- 页尾生成「参考源码」表，链接到 GitHub blob 的具体行；
-- 按事实层聚合调用边，生成 Mermaid 模块依赖图 / 模块调用关系 / 流程调用链；
-- 生成 ``Home`` / ``_Sidebar`` / ``_Footer`` 与模块、接口、流程三类索引页。
+- **wiki 页面**：清洗 front matter、行内 ``[E#]`` 与「出处」机器段；
+  页尾生成「参考源码」表，链接到源码仓库 blob 的具体行；
+  按事实层聚合调用边，生成 Mermaid 模块依赖图 / 模块调用关系 / 流程调用链；
+  生成 ``Home`` / ``_Sidebar`` / ``_Footer`` 与模块、接口、流程三类索引页。
+- **RAG 增强**：导出是纯确定性转换、不裁剪页面，页面集合与发布版本
+  一一对应，检索索引仍按发布页全量切块，召回不受导航化影响。
 
-导出是纯确定性转换，不调模型；页面集合与发布版本一一对应，
-因此 RAG 索引仍按发布页全量切块，不受导出影响。
+GitHub 仅是投放目标，命名与实现不绑定任何托管平台。
 """
 
 from __future__ import annotations
@@ -72,7 +74,7 @@ def _call_priority(symbol: SymbolFact) -> int:
 
 
 @dataclass(frozen=True)
-class WikiTarget:
+class RepoWikiTarget:
     """GitHub 侧的目标信息：源码仓库地址、快照 revision 与仓库内子目录。"""
 
     repo_id: str
@@ -81,7 +83,7 @@ class WikiTarget:
     root: str = ""
 
     @classmethod
-    def from_repo(cls, repo_id: str, url: str, revision: str, root: str = "") -> WikiTarget:
+    def from_repo(cls, repo_id: str, url: str, revision: str, root: str = "") -> RepoWikiTarget:
         clean = url.strip()
         if clean.endswith(".git"):
             clean = clean[: -len(".git")]
@@ -94,7 +96,7 @@ class WikiTarget:
 
 
 def wiki_page_name(page_id: str) -> str:
-    """页面 ID → GitHub Wiki 文件名（扁平、只用 [A-Za-z0-9._-]）。"""
+    """页面 ID → Repo Wiki 文件名（扁平、只用 [A-Za-z0-9._-]，兼容 GitHub wiki git 仓库）。"""
     if page_id in _PAGE_NAME:
         return _PAGE_NAME[page_id]
     page_type, _sep, rest = page_id.partition("/")
@@ -104,12 +106,12 @@ def wiki_page_name(page_id: str) -> str:
     return f"{prefix}-{_sanitize(rest)}"
 
 
-def build_github_wiki(
+def build_repo_wiki(
     version_dir: Path,
     index: VersionIndex,
     payload: list[tuple[str, str, str]],
     facts: RepoFacts,
-    target: WikiTarget,
+    target: RepoWikiTarget,
 ) -> Path:
     """生成 ``versions/<id>/wiki/``；先写临时目录再原子替换。"""
     tmp = version_dir / "wiki.tmp"
@@ -164,7 +166,7 @@ def _render_page(
     page_id: str,
     body: str,
     evidence: dict[str, tuple[str, int, str]],
-    target: WikiTarget,
+    target: RepoWikiTarget,
     facts: RepoFacts,
     edges: Counter[tuple[str, str]],
     symbols: dict[str, SymbolFact],
@@ -299,7 +301,7 @@ def _evidence_map(result_text: str) -> dict[str, tuple[str, int, str]]:
 def _reference_section(
     cited: list[str],
     evidence: dict[str, tuple[str, int, str]],
-    target: WikiTarget,
+    target: RepoWikiTarget,
 ) -> str:
     rows: list[str] = []
     fallback: list[str] = []
@@ -536,7 +538,7 @@ def _home_md(
     edges: Counter[tuple[str, str]],
     names: dict[str, str],
     body: str,
-    target: WikiTarget,
+    target: RepoWikiTarget,
 ) -> str:
     quote = _one_line_quote(body) or f"{index.repo_id} 的代码 Wiki。"
     module_pages = sum(1 for key in names if key.startswith("module/"))
@@ -805,7 +807,7 @@ def _short_title(title: str) -> str:
     return text[:39] + "…"
 
 
-def _footer(index: VersionIndex, target: WikiTarget) -> str:
+def _footer(index: VersionIndex, target: RepoWikiTarget) -> str:
     sha = index.snapshot_id.split("@", 1)[-1]
     short = sha[:8] if sha else "unknown"
     return (
@@ -846,4 +848,4 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text.rstrip() + "\n", encoding="utf-8")
 
 
-__all__ = ["WikiTarget", "build_github_wiki", "wiki_page_name"]
+__all__ = ["RepoWikiTarget", "build_repo_wiki", "wiki_page_name"]

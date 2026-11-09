@@ -1,4 +1,4 @@
-"""S36：GitHub Wiki 导出的确定性转换。"""
+"""S36：Repo Wiki 导出（wiki 页面 + RAG 增强）的确定性转换。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from codingwiki.domain.wiki import (
     VersionIndex,
     VersionPageEntry,
 )
-from codingwiki.publish.github_wiki import WikiTarget, build_github_wiki, wiki_page_name
+from codingwiki.publish.repo_wiki import RepoWikiTarget, build_repo_wiki, wiki_page_name
 
 SHA = "4f65f97c1d5f701ce911f7dda8f1b1f3f0c7693c"
 
@@ -185,8 +185,8 @@ def _payload() -> list[tuple[str, str, str]]:
 def _build(tmp_path: Path) -> Path:
     version_dir = tmp_path / "versions" / "v1"
     version_dir.mkdir(parents=True)
-    target = WikiTarget.from_repo("demo", "https://github.com/acme/demo.git", SHA, root="sub")
-    return build_github_wiki(version_dir, _index(), _payload(), _facts(), target)
+    target = RepoWikiTarget.from_repo("demo", "https://github.com/acme/demo.git", SHA, root="sub")
+    return build_repo_wiki(version_dir, _index(), _payload(), _facts(), target)
 
 
 def test_page_names_are_flat_and_github_safe() -> None:

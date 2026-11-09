@@ -20,7 +20,7 @@ from codingwiki.errors import EnvironmentIssue, InputError, InternalError, Retry
 
 if TYPE_CHECKING:
     from codingwiki.backends.protocol import ModelBackend
-    from codingwiki.publish.github_wiki import WikiTarget
+    from codingwiki.publish.repo_wiki import RepoWikiTarget
     from codingwiki.snapshot import FilesystemSnapshotStore
 
 
@@ -288,11 +288,11 @@ def stage_verify(ctx: JobContext) -> str:
     return f"复验 {len(page_ids)} 页全部通过"
 
 
-def _github_wiki_target(ctx: JobContext, snapshot_id: str) -> WikiTarget:
-    from codingwiki.publish.github_wiki import WikiTarget
+def _repo_wiki_target(ctx: JobContext, snapshot_id: str) -> RepoWikiTarget:
+    from codingwiki.publish.repo_wiki import RepoWikiTarget
 
     revision = snapshot_id.split("@", 1)[-1] or ctx.repo.revision
-    return WikiTarget.from_repo(ctx.repo.repo_id, ctx.repo.url, revision, ctx.repo.root)
+    return RepoWikiTarget.from_repo(ctx.repo.repo_id, ctx.repo.url, revision, ctx.repo.root)
 
 
 def stage_publish(ctx: JobContext) -> str:
@@ -316,7 +316,7 @@ def stage_publish(ctx: JobContext) -> str:
         workdir=workdir,
         site_profile=profile,
         facts=facts,
-        github_wiki=_github_wiki_target(ctx, facts.snapshot_id),
+        repo_wiki=_repo_wiki_target(ctx, facts.snapshot_id),
     )
     counts = index.status_counts
     return (
