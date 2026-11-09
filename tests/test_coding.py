@@ -1784,6 +1784,39 @@ def test_assert_command_allowed_blocks_destructive() -> None:
     assert_command_allowed(["pytest", "-q"], source="test")
 
 
+def test_assert_command_allowed_blocks_lossy_flags() -> None:
+    for argv, reason in (
+        (["rm", "-r", "-f", "build"], "递归强制删除"),
+        (["rm", "--recursive", "--force", "build"], "递归强制删除"),
+        (["find", ".", "-name", "*.o", "-delete"], "批量删除"),
+        (["git", "filter-branch", "--all"], "重写历史"),
+        (["git", "filter-repo", "--force"], "重写历史"),
+        (["git", "reflog", "expire", "--expire=now", "--all"], "清理 reflog"),
+        (["git", "gc", "--prune=now"], "激进回收对象"),
+        (["git", "update-ref", "-d", "refs/heads/main"], "删除引用"),
+        (["git", "checkout", "--", "."], "丢弃工作区改动"),
+        (["git", "checkout", "HEAD", "--", "src/main.c"], "丢弃工作区改动"),
+        (["git", "restore", "src/main.c"], "丢弃工作区改动"),
+        (["git", "worktree", "remove", "--force", "/tmp/wt"], "强删工作树"),
+        (["shred", "-u", "src/main.c"], "粉碎文件"),
+        (["truncate", "-s", "0", "src/main.c"], "清空文件"),
+    ):
+        with pytest.raises(InputError, match=reason):
+            assert_command_allowed(argv, source="test")
+
+
+def test_assert_command_allowed_keeps_read_only_git() -> None:
+    for argv in (
+        ["git", "status", "--short"],
+        ["git", "diff", "--stat"],
+        ["git", "log", "--oneline", "-3"],
+        ["git", "checkout", "main"],
+        ["git", "restore", "--staged", "src/main.c"],
+        ["rm", "-f", "build/out.o"],
+    ):
+        assert_command_allowed(argv, source="test")
+
+
 def test_forbidden_stage_command_rejected(env: CodingEnv, tmp_path: Path) -> None:
     _with_commands(env, 'commands:\n  build:\n    compile: "rm -rf /"\n')
 
@@ -1796,6 +1829,18 @@ def test_forbidden_backend_command_rejected(env: CodingEnv, tmp_path: Path) -> N
     config = BackendConfig(kind="command", command=["sudo", "python"], timeout_seconds=30)
 
     with pytest.raises(InputError, match="提权"):
+        run_task(GitProvider(), manager, repo, spec, task, config)
+
+
+def test_forbidden_backend_history_rewrite_rejected(env: CodingEnv, tmp_path: Path) -> None:
+    repo, manager, _worktree, spec, task = _setup(env)
+    config = BackendConfig(
+        kind="command",
+        command=["git", "filter-branch", "--all"],
+        timeout_seconds=30,
+    )
+
+    with pytest.raises(InputError, match="重写历史"):
         run_task(GitProvider(), manager, repo, spec, task, config)
 
 
