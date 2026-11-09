@@ -2,7 +2,7 @@
 
 护栏是编排器的职责：模型只改文件，所有进程由编排器启动。
 这里做两件事：
-1. 启动前拒绝明显破坏性的命令（删除/硬回滚/提权/裸写磁盘等）；
+1. 启动前拒绝明显破坏性的命令（删除/重写历史/丢弃工作区/强删工作树/提权/裸写磁盘等）；
 2. 把每条实际执行的命令追加到 `<run>/audit/commands.jsonl`，供人工复盘。
 """
 
@@ -18,11 +18,41 @@ from codingwiki.errors import InputError
 from codingwiki.exec.protocol import CommandResult, CommandRunner, CommandSpec
 
 _FORBIDDEN: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(^|\s)rm\s+-[a-z]*r[a-z]*f\b|(^|\s)rm\s+-[a-z]*f[a-z]*r\b"), "递归强制删除"),
+    # 删除仓库/文件
+    (
+        re.compile(
+            r"(^|\s)rm\s+(?:-{1,2}[a-z-]+\s+)*-[a-z]*r[a-z]*f\b"
+            r"|(^|\s)rm\s+(?:-{1,2}[a-z-]+\s+)*-[a-z]*f[a-z]*r\b"
+        ),
+        "递归强制删除",
+    ),
+    (re.compile(r"(^|\s)rm\s+-[rR]\s+-[a-z]*f\b|(^|\s)rm\s+-[a-z]*f\s+-[rR]\b"), "递归强制删除"),
+    (
+        re.compile(
+            r"(^|\s)rm\s+--recursive\b[^\n]*\s--force\b|(^|\s)rm\s+--force\b[^\n]*--recursive\b"
+        ),
+        "递归强制删除",
+    ),
+    (re.compile(r"\bgit\s+rm\s+-r\b"), "递归删除版本文件"),
+    (re.compile(r"\bfind\s+[^\n]*\s-delete\b"), "批量删除"),
+    (re.compile(r"\bshred\b"), "粉碎文件"),
+    (re.compile(r"\btruncate\s+-s\s*0\b"), "清空文件"),
+    # 重写历史/破坏恢复点
+    (re.compile(r"\bgit\s+(?:filter-branch|filter-repo)\b"), "重写历史"),
+    (re.compile(r"\bgit\s+reflog\s+expire\b"), "清理 reflog"),
+    (re.compile(r"\bgit\s+gc\b[^\n]*--prune\b"), "激进回收对象"),
+    (re.compile(r"\bgit\s+replace\b"), "替换历史对象"),
+    (re.compile(r"\bgit\s+update-ref\s+-d\b"), "删除引用"),
+    (re.compile(r"\bgit\s+tag\s+-d\b"), "删除版本标签"),
     (re.compile(r"\bgit\s+reset\s+--hard\b"), "硬回滚"),
     (re.compile(r"\bgit\s+clean\s+-[a-z]*f\b"), "强制清理未跟踪文件"),
+    # 分支/工作区
     (re.compile(r"\bgit\s+push\b"), "推送远端"),
     (re.compile(r"\bgit\s+branch\s+-D\b"), "强删分支"),
+    (re.compile(r"\bgit\s+worktree\s+remove\b[^\n]*--force\b"), "强删工作树"),
+    (re.compile(r"\bgit\s+checkout\b[^\n]*\s--\s"), "丢弃工作区改动"),
+    (re.compile(r"\bgit\s+restore\b(?![^\n]*--staged)"), "丢弃工作区改动"),
+    # 系统级破坏
     (re.compile(r"(^|\s)(sudo|doas|su)\s"), "提权"),
     (re.compile(r"\bmkfs(\.|\s)"), "格式化磁盘"),
     (re.compile(r"\bdd\s+[^\n]*\bof="), "裸写磁盘"),
