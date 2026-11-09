@@ -428,6 +428,11 @@ def build_parser() -> argparse.ArgumentParser:
     patch_check_parser.add_argument(
         "--max-lines", type=int, default=0, help="改动行数上限；0 表示默认 300"
     )
+    patch_check_parser.add_argument(
+        "--allow-new-dependencies",
+        action="store_true",
+        help="允许依赖清单新增依赖（需 Spec 明确并人工批准）",
+    )
     patch_check_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
     patch_check_parser.add_argument("--json", action="store_true", help="输出机读 JSON 报告")
     patch_check_parser.set_defaults(handler=_cmd_patch_check)
@@ -465,6 +470,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--verifier-config", default="", help="独立验证器 YAML 配置；空表示只跑机械检查"
     )
     coding_run_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    coding_run_parser.add_argument(
+        "--allow-new-dependencies",
+        action="store_true",
+        help="允许依赖清单新增依赖（需 Spec 明确并人工批准）",
+    )
     coding_run_parser.add_argument(
         "--max-rounds", type=int, default=5, help="最大修复轮次（默认 5）"
     )
@@ -1319,6 +1329,7 @@ def _cmd_patch_check(args: argparse.Namespace) -> int:
         allowed_paths=allowed,
         max_files=args.max_files or 3,
         max_lines=args.max_lines or 300,
+        allow_new_dependencies=args.allow_new_dependencies,
     )
     report = check_workspace(provider, record, policy, manager)
 
@@ -1424,6 +1435,7 @@ def _cmd_coding_run(args: argparse.Namespace) -> int:
             max_tokens=args.max_tokens,
             diff_growth_rounds=args.diff_growth_rounds,
         ),
+        allow_new_dependencies=args.allow_new_dependencies,
     )
 
     run_path = (

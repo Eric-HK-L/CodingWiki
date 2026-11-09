@@ -68,20 +68,12 @@ _DENY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"(^|/)(CMakeLists\.txt|Makefile|GNUmakefile|makefile|meson\.build|BUILD|"
-            r"BUILD\.bazel|WORKSPACE|WORKSPACE\.bazel|setup\.py|setup\.cfg|pyproject\.toml|"
+            r"BUILD\.bazel|WORKSPACE|WORKSPACE\.bazel|setup\.py|conanfile\.py|"
             r"build\.sh|configure|configure\.ac)$"
         ),
         "构建脚本",
     ),
     (re.compile(r"(^|/)[^/]+\.(mk|cmake)$"), "构建脚本"),
-    (
-        re.compile(
-            r"(^|/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|"
-            r"requirements[^/]*\.txt|Pipfile|Pipfile\.lock|poetry\.lock|go\.mod|go\.sum|"
-            r"Cargo\.toml|Cargo\.lock|vcpkg\.json|conanfile\.(txt|py)|Gemfile|Gemfile\.lock)$"
-        ),
-        "依赖清单",
-    ),
     (
         re.compile(
             r"(^|/)(\.env[^/]*|id_rsa[^/]*|id_ed25519[^/]*|credentials[^/]*|secrets[^/]*|"
@@ -149,6 +141,18 @@ _ASSERTION_RE = re.compile(
 
 _TEST_DIR_RE = re.compile(r"(^|/)(tests?|testing|test_data)/")
 _TEST_NAME_RE = re.compile(r"(^|/)(test_[^/]*|[^/]*_test(s)?\.[^/]+|[^/]*Tests?\.[^/]+)$")
+
+# 依赖清单与锁文件（计划 14.9：禁止新增依赖，除非 Spec 明确）。
+# 这里只识别文件，不做语法解析；新增行一律视为依赖声明。
+_DEPENDENCY_MANIFEST_RE = re.compile(
+    r"(^|/)(requirements[^/]*\.txt|pyproject\.toml|setup\.cfg|Pipfile|"
+    r"package\.json|Cargo\.toml|go\.mod|vcpkg\.json|conanfile\.txt|Gemfile|"
+    r"pom\.xml|build\.gradle(?:\.kts)?|environment[^/]*\.ya?ml|conda[^/]*\.ya?ml)$"
+)
+_LOCKFILE_RE = re.compile(
+    r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Pipfile\.lock|poetry\.lock|"
+    r"Cargo\.lock|go\.sum|Gemfile\.lock|conan\.lock|uv\.lock|[^/]+\.lock)$"
+)
 
 _COMMENT_PREFIXES = ("//", "#", "/*", "*", "--")
 _COMMENT_EXEMPT_PREFIXES = (
@@ -222,6 +226,16 @@ def is_test_path(path: str) -> bool:
 def is_code_path(path: str) -> bool:
     dot = path.rfind(".")
     return dot >= 0 and path[dot:] in _CODE_EXTENSIONS
+
+
+def is_lockfile(path: str) -> bool:
+    """锁文件：只提示人工确认解析结果，不直接阻断。"""
+    return bool(_LOCKFILE_RE.search(path))
+
+
+def is_dependency_manifest(path: str) -> bool:
+    """依赖清单或锁文件：新增行需要 Spec 明确允许（计划 14.9）。"""
+    return bool(_DEPENDENCY_MANIFEST_RE.search(path)) or is_lockfile(path)
 
 
 def is_allowed_path(path: str, policy: PatchPolicy) -> bool:
@@ -355,6 +369,7 @@ def content_findings(diffs: Iterable[FileDiff], policy: PatchPolicy) -> list[Pat
                 )
             )
         findings.extend(_added_line_findings(item, policy))
+        findings.extend(_dependency_findings(item, policy))
         if is_test_path(item.path):
             findings.extend(_removed_assertion_findings(item))
         findings.extend(_comment_block_findings(item, policy))
@@ -455,6 +470,37 @@ def _added_line_findings(item: FileDiff, policy: PatchPolicy) -> list[PatchFindi
     return findings
 
 
+def _dependency_findings(item: FileDiff, policy: PatchPolicy) -> list[PatchFinding]:
+    """依赖清单新增行默认阻断；锁文件变更只提示（计划 14.9）。"""
+    if not is_dependency_manifest(item.path):
+        return []
+    if is_lockfile(item.path):
+        return [
+            PatchFinding(
+                code="dep.lockfile_change",
+                severity=FindingSeverity.WARNING,
+                message=f"{item.path} 锁文件变更，需人工确认依赖解析结果",
+                path=item.path,
+            )
+        ]
+    added = [
+        line.strip() for line in item.added_text if line.strip() and not _is_comment_line(line)
+    ]
+    if not added or policy.allow_new_dependencies:
+        return []
+    return [
+        PatchFinding(
+            code="dep.new_dependency",
+            severity=FindingSeverity.BLOCKER,
+            message=(
+                f"{item.path} 新增 {len(added)} 行依赖声明（如 {added[0][:60]}），"
+                "需 Spec 明确允许（--allow-new-dependencies）"
+            ),
+            path=item.path,
+        )
+    ]
+
+
 def _removed_assertion_findings(item: FileDiff) -> list[PatchFinding]:
     findings: list[PatchFinding] = []
     for line in item.removed_text:
@@ -508,6 +554,8 @@ __all__ = [
     "deny_reason",
     "is_allowed_path",
     "is_code_path",
+    "is_dependency_manifest",
+    "is_lockfile",
     "is_test_path",
     "limit_findings",
     "path_findings",
