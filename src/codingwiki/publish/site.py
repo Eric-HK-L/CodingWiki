@@ -26,6 +26,7 @@ from codingwiki.domain.wiki import VersionIndex
 
 if TYPE_CHECKING:
     from codingwiki.domain.dashboard import DashboardData
+    from codingwiki.domain.facts import RepoFacts
 
 _PAGE_TYPES = (
     "module",
@@ -133,6 +134,7 @@ def build_site(
     workdir: Path,
     profile: Mapping[str, object],
     dashboard: DashboardData | None = None,
+    facts: RepoFacts | None = None,
 ) -> Path:
     """生成 site/；先写临时目录再原子替换，失败不会破坏旧站点。"""
     tmp = version_dir / "site.tmp"
@@ -177,6 +179,8 @@ def build_site(
         _ = page_type
 
     home_body = _page_body(page_text.get("home", ""))
+    # 模型写的「导航」段常带任务上下文残留（S36），导航统一由 _nav_html 生成
+    home_body = _drop_section(home_body, "导航")
     home_content = _render_body(
         home_body,
         page_id="home",
@@ -184,7 +188,9 @@ def build_site(
         known=known,
         evidence=evidence,
     )
-    home_content += _nav_html(index, titles)
+    home_content = (
+        _module_index_html(index, facts, titles) + home_content + _nav_html(index, titles)
+    )
     home_html = _layout(
         title=f"{index.repo_id} Repo Wiki",
         repo=index.repo_id,
@@ -272,6 +278,59 @@ def _profile_html(index: VersionIndex, profile: Mapping[str, object]) -> str:
         f'<div class="card"><b>{_esc(value)}</b>{_esc(label)}</div>' for label, value in items
     )
     return f'<section class="cards">{cards}</section>'
+
+
+def _module_index_html(index: VersionIndex, facts: RepoFacts | None, titles: dict[str, str]) -> str:
+    """首页模块索引（S36）：按文件数排序，补齐"从介绍到模块"的入口。"""
+    if facts is None:
+        return ""
+    from codingwiki.generate.modules import module_groups
+
+    groups = module_groups(facts)
+    rows: list[tuple[str, int, int, str, str]] = []
+    for entry in index.pages:
+        if not entry.page_id.startswith("module/"):
+            continue
+        module = entry.page_id[len("module/") :]
+        files = groups.get(module, [])
+        symbols = sum(len(file.symbols) for file in files)
+        rows.append(
+            (
+                module,
+                len(files),
+                symbols,
+                f"pages/{entry.page_id}.html",
+                titles.get(entry.page_id, entry.page_id),
+            )
+        )
+    if not rows:
+        return ""
+    rows.sort(key=lambda item: (-item[1], item[0]))
+    body = "".join(
+        "<tr>"
+        f'<td><a href="{_esc(url)}">{_esc(title)}</a></td>'
+        f"<td>{count}</td><td>{symbols or '—'}</td>"
+        "</tr>"
+        for _module, count, symbols, url, title in rows
+    )
+    return (
+        "<section><h2>模块索引</h2>"
+        f"<p>共 {len(rows)} 个模块页，按文件数排序。</p>"
+        "<table><thead><tr><th>模块</th><th>文件</th><th>符号</th></tr></thead>"
+        f"<tbody>{body}</tbody></table></section>"
+    )
+
+
+def _drop_section(body: str, heading: str) -> str:
+    """删除以 ``## <heading>`` 开头的整段（到下一个二级标题为止）。"""
+    out: list[str] = []
+    skipping = False
+    for line in body.splitlines():
+        if line.strip().startswith("## "):
+            skipping = line.strip()[3:].strip() == heading
+        if not skipping:
+            out.append(line)
+    return "\n".join(out)
 
 
 def _search_html() -> str:

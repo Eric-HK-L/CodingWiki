@@ -31,6 +31,7 @@ from codingwiki.errors import InputError
 
 if TYPE_CHECKING:
     from codingwiki.domain.facts import RepoFacts
+    from codingwiki.publish.github_wiki import WikiTarget
 
 _INTERNAL_LINK = re.compile(
     r"\[[^\]]*\]\(((?:module|interface|flow|config|build|test|overview|home|architecture|glossary|howto|adr|file)/[^)\s]+)\)"
@@ -129,11 +130,13 @@ class FilesystemPageStore:
         workdir: Path | None = None,
         site_profile: Mapping[str, object] | None = None,
         facts: RepoFacts | None = None,
+        github_wiki: WikiTarget | None = None,
     ) -> VersionIndex:
         """发布草稿区。传 workdir 时同时生成离线站点，站点成功后才切 current。
 
         传 facts 时额外生成覆盖率看板页 dashboard.html（架构 v0.10 §19）；
         facts 缺失时站点不含看板（存量调用路径不受影响）。
+        传 github_wiki 时额外生成可 push 到 GitHub Wiki 的 ``wiki/`` 目录（S36）。
         """
         page_ids = self.list_drafts()
         if not page_ids:
@@ -219,7 +222,13 @@ class FilesystemPageStore:
                 workdir,
                 site_profile or {},
                 dashboard=dashboard,
+                facts=facts,
             )
+
+        if github_wiki is not None and facts is not None:
+            from codingwiki.publish.github_wiki import build_github_wiki
+
+            build_github_wiki(version_dir, index, payload, facts, github_wiki)
 
         (self._root / "current").write_text(version_id, encoding="utf-8")
         return index
@@ -259,6 +268,26 @@ class FilesystemPageStore:
                 continue
             pages.append((entry.page_id, entry.title, path.read_text(encoding="utf-8")))
         return pages
+
+    def load_published_payload(self, version_id: str | None = None) -> list[tuple[str, str, str]]:
+        """读取发布页原文与 result.json：(page_id, page_text, result_text)，供 GitHub Wiki 导出。"""
+        version = version_id or self.current_version()
+        if version is None:
+            return []
+        index = self.version_index(version)
+        if index is None:
+            return []
+        pages_dir = self._root / "versions" / version / "pages"
+        payload: list[tuple[str, str, str]] = []
+        for entry in index.pages:
+            stem = pages_dir / entry.page_id
+            page_path = stem.with_suffix(".md")
+            if not page_path.is_file():
+                continue
+            result_path = stem.with_suffix(".result.json")
+            result_text = result_path.read_text(encoding="utf-8") if result_path.is_file() else "{}"
+            payload.append((entry.page_id, page_path.read_text(encoding="utf-8"), result_text))
+        return payload
 
     # ---------------------------------------------------------------- 页面生命周期（S7 §16.3-5）
 

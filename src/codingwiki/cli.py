@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from codingwiki.domain.eval import EvalReport, QuestionResult
     from codingwiki.domain.job import JobRecord
     from codingwiki.domain.spec import EvidenceBundle, ExtractionResult, Requirement, SpecDocument
+    from codingwiki.publish.github_wiki import WikiTarget
     from codingwiki.retrieval import HybridSearcher
     from codingwiki.spec.evidence import WikiPageRef
 
@@ -146,6 +147,14 @@ def build_parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--repo", required=True, help="仓库 ID")
     publish_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
     publish_parser.set_defaults(handler=_cmd_wiki_publish)
+
+    export_parser = wiki_subcommands.add_parser(
+        "export", help="把已发布版本导出为 GitHub Wiki Markdown（S36）"
+    )
+    export_parser.add_argument("--repo", required=True, help="仓库 ID")
+    export_parser.add_argument("--config-dir", default="configs/repos", help="仓库配置目录")
+    export_parser.add_argument("--version", default="", help="版本 ID；默认当前版本")
+    export_parser.set_defaults(handler=_cmd_wiki_export)
 
     status_parser = wiki_subcommands.add_parser("status", help="Wiki 质量看板摘要")
     status_parser.add_argument("--repo", required=True, help="仓库 ID")
@@ -767,15 +776,56 @@ def _cmd_wiki_publish(args: argparse.Namespace) -> int:
         "tests": len(facts.tests),
         "config_facts": len(facts.config_facts),
     }
-    index = store.publish(facts.snapshot_id, workdir=workdir, site_profile=profile, facts=facts)
+    index = store.publish(
+        facts.snapshot_id,
+        workdir=workdir,
+        site_profile=profile,
+        facts=facts,
+        github_wiki=_wiki_target(args.repo, args.config_dir, facts.snapshot_id),
+    )
     counts = index.status_counts
-    site = store.version_dir(index.version_id) / "site" / "index.html"
+    version_dir = store.version_dir(index.version_id)
+    site = version_dir / "site" / "index.html"
     print(
         f"发布成功: version={index.version_id}, pages={len(index.pages)}, "
         f"verified={counts.get('verified', 0)}"
     )
     print(f"站点: {site}（离线打开 index.html，首页 2 次点击可达模块页）")
     print(f"看板: {site.parent / 'dashboard.html'}")
+    print(f"GitHub Wiki: {version_dir / 'wiki'}（可直接覆盖到 <repo>.wiki.git）")
+    return int(ExitCode.OK)
+
+
+def _wiki_target(repo_id: str, config_dir: str, snapshot_id: str) -> WikiTarget:
+    from codingwiki.publish.github_wiki import WikiTarget
+
+    repo = load_repo_config(os.path.join(config_dir, f"{repo_id}.yaml"))
+    revision = snapshot_id.split("@", 1)[-1] or "latest"
+    return WikiTarget.from_repo(repo_id, repo.url, revision, repo.root)
+
+
+def _cmd_wiki_export(args: argparse.Namespace) -> int:
+    from codingwiki.publish import FilesystemPageStore
+
+    store = FilesystemPageStore(args.repo)
+    version = args.version or store.current_version()
+    if not version:
+        raise InputError(f"仓库 {args.repo} 还没有发布版本，请先执行 wiki publish")
+    index = store.version_index(version)
+    if index is None:
+        raise InputError(f"版本 {version} 不存在或 index.json 缺失")
+    payload = store.load_published_payload(version)
+    if not payload:
+        raise InputError(f"版本 {version} 没有可导出的页面")
+
+    facts = load_facts_or_raise(args.repo)
+    target = _wiki_target(args.repo, args.config_dir, index.snapshot_id)
+    from codingwiki.publish.github_wiki import build_github_wiki
+
+    out = build_github_wiki(store.version_dir(version), index, payload, facts, target)
+    print(f"导出完成: version={version}, pages={len(payload)}")
+    print(f"GitHub Wiki: {out}")
+    print(f"提示: 克隆 {target.repo_url}.wiki.git 后，把该目录内容覆盖进去并提交")
     return int(ExitCode.OK)
 
 
