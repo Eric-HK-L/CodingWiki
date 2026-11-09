@@ -94,6 +94,7 @@ def run_task(
     verifier: BackendConfig | None = None,
     runner: CommandRunner | None = None,
     limits: RunLimits | None = None,
+    allow_new_dependencies: bool = False,
     now: datetime | None = None,
 ) -> CodingRun:
     """基线 → 多轮编码 →（可选）独立验证；成功保留工作区，失败保留证据，不自动回滚。
@@ -120,7 +121,10 @@ def run_task(
     run_id = f"RUN-{task.id}-{stamp}"
     run_dir = manager.home / "coding" / repo.repo_id / spec.spec_id / task.id / "runs" / run_id
 
-    policy = PatchPolicy(allowed_paths=task.files_allowed)
+    policy = PatchPolicy(
+        allowed_paths=task.files_allowed,
+        allow_new_dependencies=allow_new_dependencies,
+    )
     source_root = workspace / record.root if record.root else workspace
     tmp_dir = run_dir / "tmp"
     pairs = stage_specs(repo, workspace_root=source_root, tmp_dir=tmp_dir)

@@ -1680,6 +1680,32 @@ def test_escalation_reason_security_and_open_question(env: CodingEnv, tmp_path: 
     assert "关闭或转交 Spec 开放问题：Q-001" in render_escalation(pending, open_spec, task)
 
 
+def test_guard_rejection_escalates_dependency_change(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, _manager, run = _run(env, tmp_path, FORBIDDEN_BACKEND, name="forbidden.py")
+    spec = _spec_doc(snapshot_id=f"demo@{env.rev}")
+    task = next(item for item in decompose(spec) if item.id == "T-001")
+    run_dir = _run_dir(env, run.run_id)
+
+    assert run.guard is not None
+    guard = run.guard.model_copy(
+        update={
+            "findings": [
+                PatchFinding(
+                    code="dep.new_dependency",
+                    severity=FindingSeverity.BLOCKER,
+                    message="requirements.txt 新增依赖声明",
+                    path="requirements.txt",
+                )
+            ]
+        }
+    )
+    report = build_escalation(run.model_copy(update={"guard": guard}), spec, task, run_dir)
+
+    assert report.reason is EscalationReason.DEPENDENCY_CHANGE
+    assert any("依赖" in item for item in report.decisions)
+    assert any("--allow-new-dependencies" in item for item in report.suggested_next_steps)
+
+
 def test_cli_coding_run_prints_escalation(
     env: CodingEnv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

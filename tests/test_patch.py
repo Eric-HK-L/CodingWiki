@@ -315,6 +315,39 @@ def test_eval_is_warning_not_blocker(env: PatchEnv) -> None:
     assert report.verdict is PatchVerdict.PASS
 
 
+def test_new_dependency_blocked_by_default(env: PatchEnv) -> None:
+    _repo_obj, manager, worktree = _open(env)
+    _write(worktree / "nvlog/requirements.txt", "numpy==2.0.0\n")
+    report = _check(env, manager, PatchPolicy(allowed_paths=["nvlog/requirements.txt"]))
+    assert "dep.new_dependency" in _codes(report)
+    assert report.verdict is PatchVerdict.FAIL
+    assert report.blockers[0].path == "nvlog/requirements.txt"
+
+
+def test_new_dependency_allowed_when_policy_enables(env: PatchEnv) -> None:
+    _repo_obj, manager, worktree = _open(env)
+    _write(worktree / "nvlog/requirements.txt", "numpy==2.0.0\n")
+    report = _check(
+        env,
+        manager,
+        PatchPolicy(
+            allowed_paths=["nvlog/requirements.txt"],
+            allow_new_dependencies=True,
+        ),
+    )
+    assert "dep.new_dependency" not in _codes(report)
+    assert report.verdict is PatchVerdict.PASS
+
+
+def test_lockfile_change_is_warning_not_blocker(env: PatchEnv) -> None:
+    _repo_obj, manager, worktree = _open(env)
+    _write(worktree / "nvlog/poetry.lock", '[[package]]\nname = "numpy"\nversion = "2.0.0"\n')
+    report = _check(env, manager, PatchPolicy(allowed_paths=["nvlog/poetry.lock"]))
+    assert "dep.lockfile_change" in _codes(report)
+    assert "dep.new_dependency" not in _codes(report)
+    assert report.verdict is PatchVerdict.PASS
+
+
 def test_source_only_change_warns_test_first(env: PatchEnv) -> None:
     _repo_obj, manager, worktree = _open(env)
     _write(worktree / "nvlog/src/nvlog.c", NVLOG_C + "int level = 1;\n")
@@ -461,6 +494,40 @@ def test_cli_open_check_rollback_close(
 
     assert main(["patch", "workspace", "close", "--task", "T-001", *common]) == 0
     assert not worktree.exists()
+
+
+def test_cli_check_allow_new_dependencies_flag(
+    env: PatchEnv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    spec_dir = _approved_spec(tmp_path / "specs", ["nvlog/requirements.txt"])
+    common = ["--repo", "demo", "--config-dir", str(env.config_dir)]
+
+    assert (
+        main(["patch", "workspace", "open", "--task", "T-001", "--revision", env.rev, *common]) == 0
+    )
+    worktree = env.home / "worktrees" / "demo" / "T-001"
+    _write(worktree / "nvlog/requirements.txt", "numpy==2.0.0\n")
+
+    capsys.readouterr()
+    assert main(["patch", "check", "--task", "T-001", "--spec-dir", str(spec_dir), *common]) == 3
+    assert "dep.new_dependency" in capsys.readouterr().out
+
+    assert (
+        main(
+            [
+                "patch",
+                "check",
+                "--task",
+                "T-001",
+                "--spec-dir",
+                str(spec_dir),
+                "--allow-new-dependencies",
+                *common,
+            ]
+        )
+        == 0
+    )
+    assert main(["patch", "workspace", "close", "--task", "T-001", *common]) == 0
 
 
 def test_collect_diffs_includes_untracked(env: PatchEnv) -> None:

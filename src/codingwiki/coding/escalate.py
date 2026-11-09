@@ -69,6 +69,11 @@ _DECISIONS: dict[EscalationReason, tuple[str, ...]] = {
         "确认该调用是否为任务必需",
         "决定要求模型改写、调整策略还是人工实现",
     ),
+    EscalationReason.DEPENDENCY_CHANGE: (
+        "确认新增依赖是否在 Spec 中明确允许",
+        "评估依赖来源、许可证与离线安装可行性",
+        "决定批准依赖变更、要求模型改用现有依赖还是人工实现",
+    ),
     EscalationReason.NO_PROGRESS: (
         "判断重复错误是任务拆分问题还是模型能力问题",
         "决定人工修复、重新拆分或更换后端",
@@ -132,6 +137,11 @@ _STEPS: dict[EscalationReason, tuple[str, ...]] = {
         "要求模型移除危险调用或改用受控 API",
         "若任务确需该能力，调整任务/策略后重新评审",
     ),
+    EscalationReason.DEPENDENCY_CHANGE: (
+        "查看 check.json 中 dep.new_dependency 的依赖清单与新增行",
+        "确认依赖是否已在 Spec/任务说明中登记并获人批准",
+        "批准则在 Spec 明确范围后用 --allow-new-dependencies 重跑，否则要求模型改用现有依赖",
+    ),
     EscalationReason.NO_PROGRESS: (
         "对照 errors.json 分析重复根因",
         "补充任务包上下文或拆分任务",
@@ -186,6 +196,8 @@ def escalation_reason(run: CodingRun, spec: SpecDocument) -> EscalationReason:
             return EscalationReason.SECURITY_ALERT
         if any(code == "diff.dangerous_call" for code in codes):
             return EscalationReason.UNSAFE_CHANGE
+        if any(code == "dep.new_dependency" for code in codes):
+            return EscalationReason.DEPENDENCY_CHANGE
     return _STOP_REASONS[run.stop_reason]
 
 
