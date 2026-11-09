@@ -7,6 +7,7 @@ from codingwiki.coding.backend import load_backend_config, run_backend
 from codingwiki.coding.delivery import build_delivery, render_delivery, render_pull_request
 from codingwiki.coding.escalate import build_escalation, escalation_reason, render_escalation
 from codingwiki.coding.packet import build_packet
+from codingwiki.coding.redgate import check_red_gate
 from codingwiki.coding.replay import replay_run
 from codingwiki.coding.run import load_approved_spec, run_task
 from codingwiki.coding.tasks import decompose
@@ -20,6 +21,7 @@ __all__ = [
     "build_escalation",
     "build_delivery",
     "build_packet",
+    "check_red_gate",
     "decompose",
     "escalation_reason",
     "load_approved_spec",

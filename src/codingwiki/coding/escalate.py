@@ -39,6 +39,7 @@ _STOP_REASONS: dict[CodingStopReason, EscalationReason] = {
     CodingStopReason.TOKEN_EXCEEDED: EscalationReason.BUDGET_EXCEEDED,
     CodingStopReason.DIFF_GROWING: EscalationReason.DIFF_GROWING,
     CodingStopReason.FLAKY_BASELINE: EscalationReason.FLAKY_TESTS,
+    CodingStopReason.RED_GATE_FAILED: EscalationReason.TEST_NOT_RED,
 }
 
 _DECISIONS: dict[EscalationReason, tuple[str, ...]] = {
@@ -79,6 +80,11 @@ _DECISIONS: dict[EscalationReason, tuple[str, ...]] = {
     EscalationReason.VERIFIER_REJECTED: (
         "判断验证问题是否成立",
         "决定人工修改、调整验证器规则或重新拆任务",
+    ),
+    EscalationReason.TEST_NOT_RED: (
+        "确认新增/修改的测试是否覆盖任务验收标准",
+        "决定补充断言、调整测试范围还是人工实现",
+        "若必须“先实现接口再补测试”，在 Spec/任务说明中登记例外后重跑",
     ),
     EscalationReason.BUDGET_EXCEEDED: (
         "确认耗时/词元预算是否合理",
@@ -140,6 +146,11 @@ _STEPS: dict[EscalationReason, tuple[str, ...]] = {
         "逐条核对 verification.json 的 blocker 与证据",
         "问题成立则人工修复后复验",
         "问题不成立则调整验证规则并重跑",
+    ),
+    EscalationReason.TEST_NOT_RED: (
+        "查看 redgate.json 的测试命令、退出码与输出",
+        "补充能复现新行为的测试断言后重跑",
+        "确属接口先行场景时，缩小任务或调整 Spec 后重新评审",
     ),
     EscalationReason.BUDGET_EXCEEDED: (
         "查看 report.json 的耗时与词元统计",

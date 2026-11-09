@@ -70,6 +70,7 @@ def metrics_of(run: CodingRun) -> RunMetrics:
         budget_exceeded=run.stop_reason
         in {CodingStopReason.TIME_EXCEEDED, CodingStopReason.TOKEN_EXCEEDED},
         diff_growing=run.stop_reason is CodingStopReason.DIFF_GROWING,
+        red_gate_blocked=run.stop_reason is CodingStopReason.RED_GATE_FAILED,
         regression=regression,
         escalated=run.status is CodingRunStatus.FAILED,
     )

@@ -24,6 +24,7 @@ from codingwiki.coding.escalate import build_escalation, render_escalation
 from codingwiki.coding.junit import JUnitConfig, load_config, parse_reports
 from codingwiki.coding.metrics import run_report, tokens_of_result
 from codingwiki.coding.packet import build_packet
+from codingwiki.coding.redgate import check_red_gate
 from codingwiki.coding.verify import verify_patch
 from codingwiki.domain.coding import (
     BackendConfig,
@@ -34,6 +35,8 @@ from codingwiki.domain.coding import (
     CodingRunStatus,
     CodingStopReason,
     FailureItem,
+    RedGateReport,
+    RedGateStatus,
     RoundReport,
     RunLimits,
     StageKind,
@@ -177,6 +180,7 @@ def run_task(
     final_backend: BackendResult | None = None
     final_guard: PatchReport | None = None
     final_verifier: VerifierReport | None = None
+    final_red_gate: RedGateReport | None = None
     packet_dir = ""
     previous_keys: set[tuple[str, str, int, str]] | None = None
     previous_diff: int | None = None
@@ -219,6 +223,7 @@ def run_task(
         stages: list[StageReport] = []
         round_errors: list[FailureItem] = []
         round_verifier: VerifierReport | None = None
+        round_gate: RedGateReport | None = None
         round_message = ""
 
         if backend.status is not BackendStatus.OK:
@@ -230,73 +235,105 @@ def run_task(
             stop_message = _guard_message(guard.findings)
             round_message = stop_message
         else:
-            stages = run_stages(
-                repair_pairs,
-                runner,
-                junit=junit,
-                attempts=repo.commands.test.retries + 1,
-                retry_on_failure=True,
+            round_gate = check_red_gate(
+                provider,
+                repo,
+                record,
+                workspace,
+                policy,
+                round_dir / "redgate",
+                runner=runner,
+                now=now,
             )
-            _write_models(round_dir / "stages.json", stages)
-            failed_stage = next(
-                (item for item in stages if item.status is not StageStatus.OK), None
-            )
-            skipped = sum(len(item.test_skipped) for item in stages)
-            round_flaky = sorted({ident for item in stages for ident in item.flaky_tests})
-            if failed_stage is None and not skipped:
-                if verifier is not None:
-                    verify_dir = round_dir / "verify"
-                    round_verifier = verify_patch(
-                        provider,
-                        verifier,
-                        spec,
-                        task,
-                        guard,
-                        stages,
-                        workspace,
-                        record.root,
-                        verify_dir,
-                        verify_dir / "result.json",
-                        verify_dir / "backend.log",
-                        now=now,
-                        audit=sink,
+            if round_gate is not None:
+                final_red_gate = round_gate
+            if round_gate is not None and round_gate.status is RedGateStatus.GREEN:
+                stop = CodingStopReason.RED_GATE_FAILED
+                stop_message = (
+                    "测试先行门禁："
+                    f"{', '.join(round_gate.test_files)} 在基线 revision 已通过，未覆盖新行为"
+                )
+                round_message = stop_message
+                round_errors = [
+                    FailureItem(
+                        stage=StageKind.TEST_FAST,
+                        code="test.first_green",
+                        message=stop_message,
                     )
-                    final_verifier = round_verifier
-                    _write_model(round_dir / "verification.json", round_verifier)
-                    _write_model(run_dir / "verification.json", round_verifier)
-                if round_verifier is not None and round_verifier.verdict is VerifierVerdict.FAIL:
-                    stop = CodingStopReason.VERIFY_REJECTED
-                    stop_message = f"独立验证未通过：{len(round_verifier.blockers)} 项 blocker"
-                    round_message = stop_message
-                else:
-                    stop = CodingStopReason.SUCCEEDED
-                    stop_message = f"第 {index} 轮通过：{_stage_summary(stages)}"
-                    if round_verifier is not None:
-                        stop_message = f"{stop_message}，独立验证通过"
-                    if round_flaky:
-                        stop_message = (
-                            f"{stop_message}；不稳定测试 {len(round_flaky)} 项（重试后通过）"
-                        )
-                    round_message = stop_message
+                ]
             else:
-                round_errors = _errors_of(stages)
-                errors = round_errors
-                _write_models(round_dir / "errors.json", errors)
-                if failed_stage is None:
-                    round_message = f"第 {index} 轮未通过：{skipped} 项测试被跳过（跳过不算通过）"
+                stages = run_stages(
+                    repair_pairs,
+                    runner,
+                    junit=junit,
+                    attempts=repo.commands.test.retries + 1,
+                    retry_on_failure=True,
+                )
+                _write_models(round_dir / "stages.json", stages)
+                failed_stage = next(
+                    (item for item in stages if item.status is not StageStatus.OK), None
+                )
+                skipped = sum(len(item.test_skipped) for item in stages)
+                round_flaky = sorted({ident for item in stages for ident in item.flaky_tests})
+                if failed_stage is None and not skipped:
+                    if verifier is not None:
+                        verify_dir = round_dir / "verify"
+                        round_verifier = verify_patch(
+                            provider,
+                            verifier,
+                            spec,
+                            task,
+                            guard,
+                            stages,
+                            workspace,
+                            record.root,
+                            verify_dir,
+                            verify_dir / "result.json",
+                            verify_dir / "backend.log",
+                            now=now,
+                            audit=sink,
+                        )
+                        final_verifier = round_verifier
+                        _write_model(round_dir / "verification.json", round_verifier)
+                        _write_model(run_dir / "verification.json", round_verifier)
+                    if (
+                        round_verifier is not None
+                        and round_verifier.verdict is VerifierVerdict.FAIL
+                    ):
+                        stop = CodingStopReason.VERIFY_REJECTED
+                        stop_message = f"独立验证未通过：{len(round_verifier.blockers)} 项 blocker"
+                        round_message = stop_message
+                    else:
+                        stop = CodingStopReason.SUCCEEDED
+                        stop_message = f"第 {index} 轮通过：{_stage_summary(stages)}"
+                        if round_verifier is not None:
+                            stop_message = f"{stop_message}，独立验证通过"
+                        if round_flaky:
+                            stop_message = (
+                                f"{stop_message}；不稳定测试 {len(round_flaky)} 项（重试后通过）"
+                            )
+                        round_message = stop_message
                 else:
-                    round_message = (
-                        f"第 {index} 轮未通过：{failed_stage.kind.value}"
-                        f"（{len(round_errors)} 项失败）"
-                    )
-                keys = {item.key for item in errors}
-                if previous_keys is not None and keys == previous_keys:
-                    stop = CodingStopReason.NO_PROGRESS
-                    stop_message = "连续两轮同一错误，停止并转人工"
-                elif index == max_rounds:
-                    stop = CodingStopReason.ROUNDS_EXHAUSTED
-                    stop_message = f"{max_rounds} 轮后仍有 {len(errors)} 项失败"
-                previous_keys = keys
+                    round_errors = _errors_of(stages)
+                    errors = round_errors
+                    _write_models(round_dir / "errors.json", errors)
+                    if failed_stage is None:
+                        round_message = (
+                            f"第 {index} 轮未通过：{skipped} 项测试被跳过（跳过不算通过）"
+                        )
+                    else:
+                        round_message = (
+                            f"第 {index} 轮未通过：{failed_stage.kind.value}"
+                            f"（{len(round_errors)} 项失败）"
+                        )
+                    keys = {item.key for item in errors}
+                    if previous_keys is not None and keys == previous_keys:
+                        stop = CodingStopReason.NO_PROGRESS
+                        stop_message = "连续两轮同一错误，停止并转人工"
+                    elif index == max_rounds:
+                        stop = CodingStopReason.ROUNDS_EXHAUSTED
+                        stop_message = f"{max_rounds} 轮后仍有 {len(errors)} 项失败"
+                    previous_keys = keys
 
         token_in, token_out = tokens_of_result(backend)
         used_ms += backend.duration_ms + sum(item.duration_ms for item in stages)
@@ -323,6 +360,7 @@ def run_task(
                 stages=stages,
                 errors=round_errors,
                 verifier=round_verifier,
+                red_gate=round_gate,
                 message=round_message,
             )
         )
@@ -351,6 +389,7 @@ def run_task(
         stages=reports[-1].stages if reports else [],
         errors=reports[-1].errors if reports else [],
         verifier=final_verifier,
+        red_gate=final_red_gate,
         round_reports=reports,
         limits=limits,
         quarantined_tests=quarantined,
@@ -384,6 +423,7 @@ def _build_run(
     stages: list[StageReport] | None = None,
     errors: list[FailureItem] | None = None,
     verifier: VerifierReport | None = None,
+    red_gate: RedGateReport | None = None,
     round_reports: list[RoundReport] | None = None,
     limits: RunLimits | None = None,
     quarantined_tests: list[str] | None = None,
@@ -409,6 +449,7 @@ def _build_run(
         stages=stages or [],
         errors=errors or [],
         verifier=verifier,
+        red_gate=red_gate,
         round_reports=round_reports or [],
         limits=limits or RunLimits(),
         quarantined_tests=quarantined_tests or [],

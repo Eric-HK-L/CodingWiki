@@ -51,6 +51,7 @@ from codingwiki.domain.coding import (
     DeliveryBundle,
     EscalationReason,
     EscalationReport,
+    RedGateStatus,
     ReplayStatus,
     RunLimits,
     RunMetrics,
@@ -2537,3 +2538,86 @@ def test_run_task_diff_growth_stops(env: CodingEnv, tmp_path: Path) -> None:
     report = _report_of(env, run.run_id)
     assert report.metrics.diff_growing
     assert not report.metrics.budget_exceeded
+
+
+# ---------------------------------------------------------------- S33 测试先行红门禁
+
+
+RED_GATE_COMMANDS = (
+    'commands:\n  test:\n    fast: "fast-cmd"\n    baseline_runs: 1\n    retries: 0\n'
+)
+
+RED_GATE_BACKEND = """\
+import json
+import sys
+from pathlib import Path
+
+workspace = Path(sys.argv[2])
+result_path = Path(sys.argv[3])
+source = workspace / "nvlog/src/nvlog.c"
+source.write_text(
+    source.read_text(encoding="utf-8") + "int level = 1;" + chr(10), encoding="utf-8"
+)
+test_file = workspace / "nvlog/tests/test_nvlog.c"
+test_file.write_text(
+    test_file.read_text(encoding="utf-8")
+    + "void test_level(void)" + chr(10)
+    + "{" + chr(10)
+    + "    assert(1);" + chr(10)
+    + "}" + chr(10),
+    encoding="utf-8",
+)
+result_path.write_text(json.dumps({"status": "ok", "summary": "done"}), encoding="utf-8")
+"""
+
+
+def test_run_task_red_gate_accepts_failing_baseline_test(env: CodingEnv, tmp_path: Path) -> None:
+    _with_commands(env, RED_GATE_COMMANDS)
+    runner = FakeRunner([_result(), _result(CommandStatus.FAILED, stderr="red\n"), _result()])
+
+    run, _worktree = _run_with_runner(env, tmp_path, runner, body=RED_GATE_BACKEND)
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert run.red_gate is not None
+    assert run.red_gate.status is RedGateStatus.RED
+    assert run.red_gate.test_files == ["nvlog/tests/test_nvlog.c"]
+    assert run.red_gate.exit_code == 1
+    assert len(runner.calls) == 3
+
+    run_dir = _run_dir(env, run.run_id)
+    assert (run_dir / "round-1" / "redgate" / "redgate.json").is_file()
+    assert not (run_dir / "round-1" / "redgate" / "worktree").exists()
+    report = _report_of(env, run.run_id)
+    assert not report.metrics.red_gate_blocked
+
+
+def test_run_task_red_gate_blocks_when_test_passes_on_baseline(
+    env: CodingEnv, tmp_path: Path
+) -> None:
+    _with_commands(env, RED_GATE_COMMANDS)
+    runner = FakeRunner([_result(), _result()])
+
+    run, _worktree = _run_with_runner(env, tmp_path, runner, body=RED_GATE_BACKEND, max_rounds=3)
+
+    assert run.status is CodingRunStatus.FAILED
+    assert run.stop_reason is CodingStopReason.RED_GATE_FAILED
+    assert run.rounds == 1
+    assert run.red_gate is not None and run.red_gate.status is RedGateStatus.GREEN
+    assert run.errors[0].code == "test.first_green"
+    assert len(runner.calls) == 2
+
+    escalation = EscalationReport.model_validate_json(
+        Path(run.escalation_path).read_text(encoding="utf-8")
+    )
+    assert escalation.reason is EscalationReason.TEST_NOT_RED
+    assert escalation.decisions
+
+    report = _report_of(env, run.run_id)
+    assert report.metrics.red_gate_blocked
+
+
+def test_run_task_red_gate_skips_without_test_changes(env: CodingEnv, tmp_path: Path) -> None:
+    _repo_obj, _manager, run = _run(env, tmp_path, SUCCESS_BACKEND)
+
+    assert run.status is CodingRunStatus.SUCCEEDED
+    assert run.red_gate is None
