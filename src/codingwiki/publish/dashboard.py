@@ -43,7 +43,7 @@ def build_dashboard(
         page_type = by_type.get(page_id)
         if page_type is PageType.INTERFACE:
             interface_files.update(deps.files)
-        elif page_type is PageType.FLOW:
+        elif page_type in (PageType.FLOW, PageType.FLOW_DETAIL):
             flow_files.update(deps.files)
 
     counts = index.status_counts

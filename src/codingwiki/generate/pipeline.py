@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from codingwiki.backends.protocol import BackendStatus, ModelBackend
 from codingwiki.domain.facts import RepoFacts
+from codingwiki.domain.module_map import ModuleMap
 from codingwiki.domain.wiki import (
     CoveragePlan,
     PageDeps,
@@ -20,7 +21,7 @@ from codingwiki.domain.wiki import (
     VerifyIssue,
     VerifyReport,
 )
-from codingwiki.generate.modules import module_groups
+from codingwiki.generate.cluster import build_module_map
 from codingwiki.generate.package import TaskPackageBuilder
 from codingwiki.generate.plan import scope_files
 from codingwiki.publish.store import FilesystemPageStore
@@ -75,6 +76,7 @@ class GeneratePipeline:
         task: PageTask,
         facts: RepoFacts,
         related_pages: list[str] | None = None,
+        module_map: ModuleMap | None = None,
     ) -> TaskOutcome:
         if task.reuse:
             return TaskOutcome(task, PageStatus.VERIFIED, attempts=0, reused=True)
@@ -88,6 +90,7 @@ class GeneratePipeline:
                 related_pages=related_pages,
                 attempt=attempt,
                 previous_errors=previous_errors,
+                module_map=module_map,
             )
             backend_result = self._backend.run(packet)
             if backend_result.status is not BackendStatus.SUCCEEDED:
@@ -127,7 +130,7 @@ class GeneratePipeline:
                     result_text,
                     report,
                     meta,
-                    deps=self._build_deps(meta, facts, task),
+                    deps=self._build_deps(meta, facts, task, module_map),
                 )
                 return TaskOutcome(task, PageStatus.DRAFT, attempts=attempt, report=report)
             previous_errors = [i for i in report.issues if i.severity == "error"] or report.issues
@@ -141,13 +144,17 @@ class GeneratePipeline:
         )
 
     def run_plan(self, plan: CoveragePlan, facts: RepoFacts) -> list[TaskOutcome]:
+        module_map = build_module_map(facts)
         all_page_ids = {t.page_id for t in plan.tasks} | set(self._store.list_drafts())
         related_by_page = {
-            task.page_id: _related_pages(task, all_page_ids, facts) for task in plan.tasks
+            task.page_id: _related_pages(task, all_page_ids, facts, module_map)
+            for task in plan.tasks
         }
 
         def run(task: PageTask) -> TaskOutcome:
-            return self.run_task(task, facts, related_pages=related_by_page[task.page_id])
+            return self.run_task(
+                task, facts, related_pages=related_by_page[task.page_id], module_map=module_map
+            )
 
         if self._max_workers > 1:
             # 真实模型生成以网络等待为主；页面写入互不重叠，可安全并发（S17 提速）
@@ -157,7 +164,13 @@ class GeneratePipeline:
 
     # ---------------------------------------------------------------- 内部
 
-    def _build_deps(self, meta: TaskMeta, facts: RepoFacts, task: PageTask) -> PageDeps:
+    def _build_deps(
+        self,
+        meta: TaskMeta,
+        facts: RepoFacts,
+        task: PageTask,
+        module_map: ModuleMap | None = None,
+    ) -> PageDeps:
         blob_by_path = facts.blob_by_path
         dep_files: dict[str, str] = {}
         for ev in meta.evidence:
@@ -165,7 +178,7 @@ class GeneratePipeline:
             if sha:
                 dep_files[ev.file] = sha
         # S17 §15.3：聚合页的依赖登记页面作用域，用于 C1 覆盖与 stale 判定
-        for path in scope_files(task, facts):
+        for path in scope_files(task, facts, module_map):
             sha = blob_by_path.get(path)
             if sha:
                 dep_files[path] = sha
@@ -182,25 +195,39 @@ class GeneratePipeline:
         )
 
 
-def _related_pages(task: PageTask, all_page_ids: set[str], facts: RepoFacts) -> list[str]:
-    """相关页面：模块页挂同目录接口页；接口页挂所在模块页；其余附系统页。"""
+def _related_pages(
+    task: PageTask,
+    all_page_ids: set[str],
+    facts: RepoFacts,
+    module_map: ModuleMap,
+) -> list[str]:
+    """相关页面：模块页挂同目录接口页与协作模块页；接口页挂所在模块页；其余附系统页。"""
     related: list[str] = []
     if task.page_type is PageType.MODULE:
-        module_dirs = {_parent_dir(path) for path in scope_files(task, facts)}
+        module_dirs = {_parent_dir(path) for path in scope_files(task, facts, module_map)}
         related = sorted(
             pid
             for pid in all_page_ids
             if pid.startswith("interface/")
             and ("." if pid == "interface/root" else pid[len("interface/") :]) in module_dirs
         )[:10]
+        # S37：协作模块互链（ModuleMap.collaborations）
+        peers = sorted(
+            pair.b if pair.a == task.scope else pair.a
+            for pair in module_map.collaborations
+            if pair.a == task.scope or pair.b == task.scope
+        )
+        related += [
+            f"module/{peer}" for peer in peers if f"module/{peer}" in all_page_ids
+        ][:5]
     elif task.page_type is PageType.INTERFACE:
         files = [file for file in facts.files if _parent_dir(file.path) == task.scope]
         module_page = ""
         if files:
             path_to_module: dict[str, str] = {}
-            for module, module_files in module_groups(facts).items():
-                for file in module_files:
-                    path_to_module.setdefault(file.path, module)
+            for entry in module_map.entries:
+                for path in entry.files:
+                    path_to_module.setdefault(path, entry.module_key)
             module = path_to_module.get(files[0].path, "")
             module_page = f"module/{module}" if module else ""
         if module_page and module_page in all_page_ids:

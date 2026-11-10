@@ -656,11 +656,13 @@ def _fmt_rate(value: float | None) -> str:
 
 def _cmd_wiki_plan(args: argparse.Namespace) -> int:
     from codingwiki.generate import CoveragePlanner
+    from codingwiki.generate.cluster import ensure_module_map
     from codingwiki.publish import FilesystemPageStore
 
     facts = load_facts_or_raise(args.repo)
     store = FilesystemPageStore(args.repo)
-    plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps())
+    module_map = ensure_module_map(facts, store.root)
+    plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps(), module_map)
 
     plans_dir = (
         Path(os.environ.get("CODINGWIKI_HOME", ".codingwiki")).resolve()
@@ -692,7 +694,10 @@ def _cmd_wiki_generate(args: argparse.Namespace) -> int:
     workdir = wiki_workdir(args.repo, args.config_dir, args.workdir)
     store = FilesystemPageStore(args.repo)
     backend, backend_name, model_name = resolve_wiki_backend(args.backend, args.app_config)
-    plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps())
+    from codingwiki.generate.cluster import ensure_module_map
+
+    module_map = ensure_module_map(facts, store.root)
+    plan = CoveragePlanner(max_tasks=args.max_tasks).plan(facts, store.load_deps(), module_map)
 
     # S17 §15.5：全量计划时清理不在计划内的旧页（接口页按目录聚合后 ID 会迁移）
     if args.max_tasks == 0:

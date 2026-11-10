@@ -34,9 +34,9 @@ if TYPE_CHECKING:
     from codingwiki.publish.repo_wiki import RepoWikiTarget
 
 _INTERNAL_LINK = re.compile(
-    r"\[[^\]]*\]\(((?:module|interface|flow|config|build|test|overview|home|architecture|glossary|howto|adr|file)/[^)\s]+)\)"
+    r"\[[^\]]*\]\(((?:module|interface|flow|flow-detail|concept|config|build|test|overview|home|architecture|glossary|howto|adr|file)/[^)\s]+)\)"
 )
-_PAGE_TYPE_CAPS = {"module": 60, "interface": 100, "flow": 120}
+_PAGE_TYPE_CAPS = {"module": 60, "interface": 100, "flow": 120, "flow-detail": 15, "concept": 20}
 _MAX_PAGES = 300
 
 
@@ -45,6 +45,11 @@ class FilesystemPageStore:
         base = Path(base_dir or os.environ.get("CODINGWIKI_HOME", ".codingwiki")).resolve()
         self._repo_id = repo_id
         self._root = base / "wiki" / repo_id
+
+    @property
+    def root(self) -> Path:
+        """wiki/<repo>/ 根目录（S37：module_map.json 等仓库级产物落盘处）。"""
+        return self._root
 
     # ---------------------------------------------------------------- 草稿区
 

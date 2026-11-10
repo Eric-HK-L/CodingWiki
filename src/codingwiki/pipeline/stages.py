@@ -228,6 +228,7 @@ def stage_facts(ctx: JobContext) -> str:
 def stage_wiki(ctx: JobContext) -> str:
     """生成并校验页面（含修复循环）；有失败页即阶段失败，阻断发布。"""
     from codingwiki.generate import CoveragePlanner, GeneratePipeline, TaskPackageBuilder
+    from codingwiki.generate.cluster import ensure_module_map
     from codingwiki.publish import FilesystemPageStore
     from codingwiki.verify import PageVerifier
 
@@ -235,7 +236,9 @@ def stage_wiki(ctx: JobContext) -> str:
     workdir = wiki_workdir(ctx.repo.repo_id, ctx.config_dir, "")
     store = FilesystemPageStore(ctx.repo.repo_id)
     backend, backend_name, model_name = resolve_wiki_backend(ctx.backend, ctx.app_config)
-    plan = CoveragePlanner().plan(facts, store.load_deps())
+    # S37：模块聚类产物落盘（同快照复用），规划按 ModuleMap 进行
+    module_map = ensure_module_map(facts, store.root)
+    plan = CoveragePlanner().plan(facts, store.load_deps(), module_map)
     # S17 §15.5：run 的 wiki 阶段总是全量计划，清理不在计划内的旧页
     store.prune_drafts({t.page_id for t in plan.tasks})
 
