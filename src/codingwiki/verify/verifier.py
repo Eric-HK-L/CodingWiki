@@ -36,7 +36,7 @@ _PLACEHOLDER_PHRASES = (
 )
 _EVIDENCE_REF = re.compile(r"\[(E\d+)\]")
 _INTERNAL_LINK = re.compile(
-    r"\[[^\]]*\]\(((?:module|interface|flow|config|build|test|overview|home|architecture|glossary|howto|adr|file)/[^)\s]+)\)"
+    r"\[[^\]]*\]\(((?:module|interface|flow|flow-detail|concept|config|build|test|overview|home|architecture|glossary|howto|adr|file)/[^)\s]+)\)"
 )
 _BODY_MIN_CHARS = 200
 _BODY_MAX_CHARS = 8000
@@ -47,6 +47,8 @@ _READABLE_FLOORS = {
     PageType.HOME: 400,
     PageType.INTERFACE: 300,
     PageType.FLOW: 400,
+    PageType.FLOW_DETAIL: 600,  # S37：关键流程结构化页
+    PageType.CONCEPT: 300,  # S37：概念页
     PageType.CONFIG: 300,
     PageType.BUILD: 300,
     PageType.TEST: 300,
@@ -88,6 +90,17 @@ _REQUIRED_SECTIONS: dict[PageType, tuple[tuple[str, ...], ...]] = {
         ("触发入口", "入口"),
         ("步骤", "流程"),
         ("关键数据结构", "结构"),
+        ("出处",),
+    ),
+    PageType.FLOW_DETAIL: (
+        ("流程概览", "流程"),
+        ("步骤", "阶段"),
+        ("分支",),
+        ("出处",),
+    ),
+    PageType.CONCEPT: (
+        ("定义",),
+        ("相关术语", "术语"),
         ("出处",),
     ),
     PageType.CONFIG: (("配置项", "配置"), ("影响范围", "默认值"), ("出处",)),

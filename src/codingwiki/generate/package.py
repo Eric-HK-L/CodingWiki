@@ -23,6 +23,7 @@ from codingwiki.domain.facts import (
     RepoFacts,
     SymbolFact,
 )
+from codingwiki.domain.module_map import ModuleMap
 from codingwiki.domain.wiki import (
     Evidence,
     FileSummary,
@@ -35,14 +36,15 @@ from codingwiki.domain.wiki import (
     VerifyIssue,
 )
 from codingwiki.errors import InternalError
+from codingwiki.generate.cluster import build_module_map, files_for_module
 from codingwiki.generate.modules import (
     call_degrees,
     is_header,
     is_public_symbol,
-    module_groups,
     rank_symbols,
     top_terms,
 )
+from codingwiki.generate.plan import concept_groups, name_tokens
 
 PROMPT_VERSIONS: dict[PageType, str] = {
     PageType.HOME: "home_page@2",
@@ -51,6 +53,8 @@ PROMPT_VERSIONS: dict[PageType, str] = {
     PageType.MODULE: "module_page@2",
     PageType.INTERFACE: "interface_page@2",
     PageType.FLOW: "flow_page@2",
+    PageType.FLOW_DETAIL: "flow_detail_page@1",
+    PageType.CONCEPT: "concept_page@1",
     PageType.CONFIG: "config_page@2",
     PageType.BUILD: "build_page@2",
     PageType.TEST: "test_page@2",
@@ -80,6 +84,8 @@ _WORD_FLOORS: dict[PageType, int] = {
     PageType.HOME: 400,
     PageType.INTERFACE: 300,
     PageType.FLOW: 400,
+    PageType.FLOW_DETAIL: 600,
+    PageType.CONCEPT: 300,
     PageType.CONFIG: 300,
     PageType.BUILD: 300,
     PageType.TEST: 300,
@@ -204,6 +210,40 @@ _PAGE_STRUCTURES: dict[PageType, str] = {
 
 ## 出处
 （由系统补全）""",
+    PageType.FLOW_DETAIL: """# <流程名>
+
+> 一句话职责：<这条关键业务流程完成什么端到端任务>
+
+## 流程概览
+（触发条件、输入输出、参与模块，带 [E]）
+
+## 步骤
+1. <阶段>：…（引用真实符号，带 [E]）
+2. <阶段>：…
+
+## 分支与边界
+（条件分支 / 错误路径 / 循环，带 [E]）
+
+## 跨模块关系
+（流程跨越的模块与协作方向，带 [E]）
+
+## 出处
+（由系统补全）""",
+    PageType.CONCEPT: """# 概念：<概念名>
+
+> 一句话定义：<这个概念在仓库里指什么>
+
+## 定义
+（从关联符号归纳出的概念含义，带 [E]）
+
+## 相关术语
+（关联的类型/符号清单与各自职责，带 [E]）
+
+## 在仓库中的角色
+（哪些模块使用它、承担什么职责，带 [E]）
+
+## 出处
+（由系统补全）""",
     PageType.CONFIG: """# 配置
 
 > 一句话职责：<配置控制哪些行为>
@@ -301,8 +341,9 @@ class TaskPackageBuilder:
         related_pages: list[str] | None = None,
         attempt: int = 1,
         previous_errors: list[VerifyIssue] | None = None,
+        module_map: ModuleMap | None = None,
     ) -> TaskPacket:
-        task_facts = _select_facts(task, facts)
+        task_facts = _select_facts(task, facts, module_map)
         evidence = self._extract_evidence(task_facts)
         meta = TaskMeta(
             task_id=task.task_id,
@@ -439,8 +480,12 @@ class TaskPackageBuilder:
 # ---------------------------------------------------------------- 事实筛选
 
 
-def _select_facts(task: PageTask, facts: RepoFacts) -> TaskFacts:
-    return _SELECTORS[task.page_type](task, facts)
+def _select_facts(
+    task: PageTask,
+    facts: RepoFacts,
+    module_map: ModuleMap | None = None,
+) -> TaskFacts:
+    return _SELECTORS[task.page_type](task, facts, module_map)
 
 
 def _module_label(task: PageTask, facts: TaskFacts) -> str:
@@ -457,21 +502,32 @@ def task_facts_module(facts: TaskFacts, task: PageTask) -> str:
     return ""
 
 
-def _module_files(task: PageTask, facts: RepoFacts) -> list[FileFacts]:
-    groups = module_groups(facts)
+def _module_files(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> list[FileFacts]:
+    if module_map is None:
+        module_map = build_module_map(facts)
+    by_path = {file.path: file for file in facts.files}
     if not task.rollup:
-        return groups.get(task.scope, [])
+        return [
+            by_path[path]
+            for path in files_for_module(module_map, task.scope)
+            if path in by_path
+        ]
     excluded = set(task.exclude)
     return [
-        file
-        for module, files in groups.items()
-        if module.startswith(task.scope) and module not in excluded
-        for file in files
+        by_path[path]
+        for entry in module_map.entries
+        if entry.module_key.startswith(task.scope) and entry.module_key not in excluded
+        for path in entry.files
+        if path in by_path
     ]
 
 
-def _select_module(task: PageTask, facts: RepoFacts) -> TaskFacts:
-    files = _module_files(task, facts)
+def _select_module(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> TaskFacts:
+    files = _module_files(task, facts, module_map)
     paths = {file.path for file in files}
     degrees = call_degrees(facts)
     all_symbols = [symbol for file in files for symbol in file.symbols]
@@ -508,7 +564,9 @@ def _select_module(task: PageTask, facts: RepoFacts) -> TaskFacts:
     )
 
 
-def _select_interface(task: PageTask, facts: RepoFacts) -> TaskFacts:
+def _select_interface(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> TaskFacts:
     files = [item for item in facts.files if _parent_dir(item.path) == task.scope]
     if not files:
         # 兼容旧计划：scope 直接指向单个文件
@@ -538,7 +596,9 @@ def _select_interface(task: PageTask, facts: RepoFacts) -> TaskFacts:
     )
 
 
-def _select_flow(task: PageTask, facts: RepoFacts) -> TaskFacts:
+def _select_flow(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> TaskFacts:
     entry_path, _sep, _entry_name = task.subject.partition("::")
     calls_by_file = {file.path: file.calls for file in facts.files if file.calls}
     symbol_file: dict[str, str] = {}
@@ -571,7 +631,9 @@ def _select_flow(task: PageTask, facts: RepoFacts) -> TaskFacts:
     )
 
 
-def _select_config(task: PageTask, facts: RepoFacts) -> TaskFacts:
+def _select_config(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> TaskFacts:
     configs = sorted(facts.config_facts, key=lambda item: (item.path, item.line, item.key))[
         : _MAX_CONFIGS * 2
     ]
@@ -583,7 +645,9 @@ def _select_config(task: PageTask, facts: RepoFacts) -> TaskFacts:
     return TaskFacts(files=files, configs=configs, stats=stats)
 
 
-def _select_build(task: PageTask, facts: RepoFacts) -> TaskFacts:
+def _select_build(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> TaskFacts:
     targets = sorted(facts.build_targets, key=lambda item: (item.name, item.path))[
         : _MAX_BUILDS * 2
     ]
@@ -598,7 +662,9 @@ def _select_build(task: PageTask, facts: RepoFacts) -> TaskFacts:
     )
 
 
-def _select_test(task: PageTask, facts: RepoFacts) -> TaskFacts:
+def _select_test(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> TaskFacts:
     tests = sorted(facts.tests, key=lambda item: (item.path, item.name))[: _MAX_TESTS * 2]
     files = [FileSummary(path=test.path) for test in tests if test.path][:_MAX_FILES]
     frameworks = Counter(test.framework for test in tests)
@@ -612,7 +678,9 @@ def _select_test(task: PageTask, facts: RepoFacts) -> TaskFacts:
     )
 
 
-def _select_system(task: PageTask, facts: RepoFacts) -> TaskFacts:
+def _select_system(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> TaskFacts:
     degrees = call_degrees(facts)
     all_symbols = [symbol for file in facts.files for symbol in file.symbols]
     symbols = rank_symbols(all_symbols, degrees, _MAX_SYMBOLS)
@@ -643,7 +711,9 @@ def _select_system(task: PageTask, facts: RepoFacts) -> TaskFacts:
     )
 
 
-def _select_glossary(task: PageTask, facts: RepoFacts) -> TaskFacts:
+def _select_glossary(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> TaskFacts:
     all_symbols = [symbol for file in facts.files for symbol in file.symbols]
     terms_symbols = top_terms(all_symbols, _MAX_SYMBOLS)
     terms = _terms(terms_symbols)
@@ -663,6 +733,29 @@ def _select_glossary(task: PageTask, facts: RepoFacts) -> TaskFacts:
     )
 
 
+def _select_concept(
+    task: PageTask, facts: RepoFacts, module_map: ModuleMap | None = None
+) -> TaskFacts:
+    """概念页上下文：关联术语符号 + 所在文件（S37 §14.2）。"""
+    token = task.subject.lower()
+    files_in_scope = set(concept_groups(facts).get(task.scope, []))
+    files = [file for file in facts.files if file.path in files_in_scope]
+    all_symbols = [symbol for file in files for symbol in file.symbols]
+    term_symbols = [
+        symbol
+        for symbol in all_symbols
+        if token in name_tokens(symbol.name)
+    ][:_MAX_TERMS]
+    degrees = call_degrees(facts)
+    symbols = rank_symbols(all_symbols, degrees, _MAX_SYMBOLS)
+    return TaskFacts(
+        files=[_file_summary(file, file.module) for file in files[:20]],
+        symbols=symbols,
+        terms=_terms(term_symbols),
+        stats={"files": len(files), "terms": len(term_symbols)},
+    )
+
+
 _SELECTORS = {
     PageType.HOME: _select_system,
     PageType.OVERVIEW: _select_system,
@@ -670,6 +763,8 @@ _SELECTORS = {
     PageType.MODULE: _select_module,
     PageType.INTERFACE: _select_interface,
     PageType.FLOW: _select_flow,
+    PageType.FLOW_DETAIL: _select_flow,
+    PageType.CONCEPT: _select_concept,
     PageType.CONFIG: _select_config,
     PageType.BUILD: _select_build,
     PageType.TEST: _select_test,
@@ -718,7 +813,13 @@ def _callers_of(symbol_ids: set[str], facts: RepoFacts) -> list[CallFact]:
 
 
 def _module_summaries(facts: RepoFacts) -> list[ModuleSummary]:
-    groups = module_groups(facts)
+    # S37：概览/架构页的模块口径与 ModuleMap 一致（含构建拆分子模块）
+    module_map = build_module_map(facts)
+    by_path = {file.path: file for file in facts.files}
+    groups: dict[str, list[FileFacts]] = {
+        entry.module_key: [by_path[p] for p in entry.files if p in by_path]
+        for entry in module_map.entries
+    }
     module_by_symbol: dict[str, str] = {}
     module_by_path: dict[str, str] = {}
     for module, files in groups.items():

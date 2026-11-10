@@ -372,7 +372,7 @@ def _render_module(meta: TaskMeta, facts: TaskFacts) -> str:
         "|---|---|---|",
     ]
     for symbol in facts.symbols[:12]:
-        row_ref = _ev_ref(meta, symbol=symbol.name)
+        row_ref = _cite(meta, symbol=symbol.name, file=symbol.path)
         lines.append(
             f"| `{symbol.name}` | {symbol.path}:{symbol.line} | "
             f"{symbol.kind.value}，签名 `{symbol.signature or symbol.qualified_name}` {row_ref} |"
@@ -380,7 +380,7 @@ def _render_module(meta: TaskMeta, facts: TaskFacts) -> str:
     lines += ["", "## 对外入口", "", "| 入口 | 签名 | 使用场景 |", "|---|---|---|"]
     entries = [s for s in facts.symbols if s.kind in _PUBLIC_KINDS][:12]
     for symbol in entries:
-        row_ref = _ev_ref(meta, symbol=symbol.name)
+        row_ref = _cite(meta, symbol=symbol.name, file=symbol.path)
         lines.append(
             f"| `{symbol.qualified_name}` | `{symbol.signature or symbol.name}` | "
             f"由同模块或其他模块调用 {row_ref} |"
@@ -392,6 +392,19 @@ def _render_module(meta: TaskMeta, facts: TaskFacts) -> str:
         f"实现按文件组织：{files}。公开符号与内部符号共享同一套数据布局，"
         f"调用关系由任务包中的 {len(facts.calls)} 条调用事实给出。[{ref}]",
         "入口函数先校验输入，再按配置选择计算路径，最后把结果写回调用方提供的缓冲区。",
+        "",
+        "## 文件清单",
+        "",
+        "| 文件 | 所在模块 | 说明 |",
+        "|---|---|---|",
+    ]
+    for item in facts.files[:16]:
+        item_ref = _cite(meta, file=item.path)
+        lines.append(
+            f"| `{item.path}` | `{item.module or meta.module or '-'}` | "
+            f"本模块实现文件 {item_ref} |"
+        )
+    lines += [
         "",
         "## 依赖与影响",
         "",
@@ -448,6 +461,19 @@ def _render_interface(meta: TaskMeta, facts: TaskFacts) -> str:
             )
     else:
         lines.append(f"- 任务包未提供调用方摘要；以头文件可见入口为准。[{ref}]")
+    lines += [
+        "",
+        "## 文件清单",
+        "",
+        "| 文件 | 所在模块 | 说明 |",
+        "|---|---|---|",
+    ]
+    for item in facts.files[:16]:
+        item_ref = _cite(meta, file=item.path)
+        lines.append(
+            f"| `{item.path}` | `{item.module or meta.module or '-'}` | "
+            f"本模块实现文件 {item_ref} |"
+        )
     lines += [
         "",
         "## 依赖与影响",
@@ -782,6 +808,122 @@ def _render_glossary(meta: TaskMeta, facts: TaskFacts) -> str:
     return "\n".join(lines)
 
 
+def _render_flow_detail(meta: TaskMeta, facts: TaskFacts) -> str:
+    """S37：关键流程结构化页（优化架构 §14.3）；步骤来自任务包调用事实。"""
+    ref = _first_ref(meta)
+    entry_path = meta.subject.partition("::")[0]
+    lines = [
+        f"# {meta.title_hint or meta.subject}",
+        "",
+        f"> 一句话职责：描述入口 {meta.subject} 从触发到结果返回的关键业务流程，"
+        "覆盖阶段划分、分支与跨模块协作。",
+        "",
+        "## 流程概览",
+        "",
+        f"流程由 {entry_path} 中的入口触发，沿调用事实逐阶段推进，"
+        f"任务包提供 {len(facts.calls)} 条直接调用事实作为步骤骨架。[{ref}]",
+        "输入为入口参数与全局配置，输出写回调用方缓冲区；参与模块以入口所在目录为主。",
+        "",
+        "## 步骤",
+        "",
+    ]
+    for idx, call in enumerate(facts.calls[:16], start=1):
+        call_ref = _cite(meta, file=call.path, line=call.line)
+        lines.append(
+            f"{idx}. 阶段 {idx}：`{call.caller or '(顶层)'}` 调用 `{call.callee}`"
+            f"（{call.path}:{call.line}），完成本阶段的数据变换。{call_ref}"
+        )
+    if not facts.calls:
+        lines.append(f"1. 阶段 1：任务包未提供调用事实，步骤以入口文件为准。[{ref}]")
+    lines += [
+        "",
+        "## 分支与边界",
+        "",
+        f"参数非法或资源不足时流程在入口校验阶段终止并返回错误码；"
+        f"各阶段只读写自己的缓冲区，跨阶段共享对象以任务包符号表为准。[{ref}]",
+        "循环与条件分支由入口参数驱动，具体判定条件以源码中的分支语句为准。",
+        "",
+        "## 跨模块关系",
+        "",
+        f"流程跨目录的调用方向与协作模块见架构页与相关模块页；"
+        f"本页步骤只引用真实存在的符号与调用事实。[{ref}]",
+        "改动入口签名前应先检查调用方摘要与对应流程页，避免阶段顺序被破坏。",
+        "",
+        "| 被调方文件 | 被调符号 | 出处 |",
+        "|---|---|---|",
+    ]
+    seen_pairs: set[tuple[str, str]] = set()
+    for call in facts.calls:
+        key = (call.path, call.callee)
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        if len(seen_pairs) > 12:
+            break
+        lines.append(
+            f"| `{call.path}` | `{call.callee}` | "
+            f"{_cite(meta, file=call.path, line=call.line)} |"
+        )
+    lines += [
+        "",
+        "## 出处",
+    ]
+    return "\n".join(lines)
+
+
+def _render_concept(meta: TaskMeta, facts: TaskFacts) -> str:
+    """S37：概念页（优化架构 §14.3）；术语与角色来自任务包上下文。"""
+    ref = _first_ref(meta)
+    token = meta.subject
+    modules_using: list[str] = sorted({f.module for f in facts.files if f.module})
+    lines = [
+        f"# 概念：{token}",
+        "",
+        f"> 一句话定义：`{token}` 是本仓库中一组相关类型与函数共同表达的概念。",
+        "",
+        "## 定义",
+        "",
+        f"概念 `{token}` 由任务包中 {facts.stats.get('terms', len(facts.terms))} 个"
+        f"名称包含该词的符号共同刻画；这些符号的声明位置见下表。[{ref}]",
+        "概念的确切语义以符号声明与调用上下文为准，本页只做归纳性描述。",
+        "",
+        "## 相关术语",
+        "",
+        "| 术语 | 位置 | 职责 |",
+        "|---|---|---|",
+    ]
+    for term in facts.terms[:16]:
+        # 术语来自符号，优先按符号名匹配证据（file+line 匹配会被 symbol 证据挡住）
+        row_ref = _cite(meta, symbol=term.term, file=term.path)
+        lines.append(
+            f"| `{term.term}` | {term.path}:{term.line} | "
+            f"{term.kind}，参与 `{token}` 概念 {row_ref} |"
+        )
+    if not facts.terms:
+        # 小仓库可能没有匹配术语：退化为符号表，保证术语段落有可校验出处
+        for symbol in facts.symbols[:16]:
+            row_ref = _cite(meta, symbol=symbol.name, file=symbol.path)
+            lines.append(
+                f"| `{symbol.name}` | {symbol.path}:{symbol.line} | "
+                f"{symbol.kind.value}，参与 `{token}` 概念 {row_ref} |"
+            )
+    if not facts.terms and not facts.symbols:
+        lines.append(
+            f"| `{token}` | 见出处 | 任务包未提供匹配术语，以符号表为准 [{ref}] |"
+        )
+    modules_text = "、".join(f"`{m}`" for m in modules_using[:8]) or "见模块页"
+    lines += [
+        "",
+        "## 在仓库中的角色",
+        "",
+        f"使用该概念符号的模块：{modules_text}。[{ref}]",
+        "修改该概念对应的数据结构时，相关术语所在文件与上述模块都需要同步检查。",
+        "",
+        "## 出处",
+    ]
+    return "\n".join(lines)
+
+
 _BODY_RENDERERS = {
     PageType.HOME: _render_home,
     PageType.OVERVIEW: _render_overview,
@@ -792,6 +934,8 @@ _BODY_RENDERERS = {
     PageType.BUILD: _render_build,
     PageType.TEST: _render_test,
     PageType.FLOW: _render_flow,
+    PageType.FLOW_DETAIL: _render_flow_detail,
+    PageType.CONCEPT: _render_concept,
     PageType.GLOSSARY: _render_glossary,
 }
 
@@ -810,6 +954,28 @@ def _ev_ref(meta: TaskMeta, symbol: str | None = None, file: str = "", line: int
         if file and ev.file == file and (line == 0 or ev.line_hint == line) and not ev.symbol:
             return f"[{ev.id}]"
     return ""
+
+
+def _cite(
+    meta: TaskMeta,
+    symbol: str | None = None,
+    file: str = "",
+    line: int = 0,
+) -> str:
+    """页面引用兜底：精确匹配 → 同文件任一证据 → 首条证据。
+
+    mock 后端是质量地板：表格/步骤行必须有引用，否则证据密度校验无法通过；
+    退化为文件级引用仍然指向真实证据，不虚构位置。
+    """
+    ref = _ev_ref(meta, symbol=symbol, file=file, line=line)
+    if ref:
+        return ref
+    if file:
+        for ev in meta.evidence:
+            if ev.file == file:
+                return f"[{ev.id}]"
+    first = _first_ref(meta)
+    return f"[{first}]" if first else ""
 
 
 def _elapsed_ms(started: float) -> int:

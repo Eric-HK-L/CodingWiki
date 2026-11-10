@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 _PAGE_TYPES = (
     "module",
     "flow",
+    "flow-detail",
+    "concept",
     "interface",
     "config",
     "build",
@@ -38,7 +40,7 @@ _PAGE_TYPES = (
     "glossary",
 )
 _INTERNAL_PREFIX = re.compile(
-    r"^(module|interface|flow|config|build|test|overview|home|architecture|glossary|file)/"
+    r"^(module|interface|flow|flow-detail|concept|config|build|test|overview|home|architecture|glossary|file)/"
 )
 _EVIDENCE_LINE = re.compile(r"^\[(E\d+)\]:\s+(\S+):(\d+)(.*)$")
 _EVIDENCE_REF = re.compile(r"\[(E\d+)\]")

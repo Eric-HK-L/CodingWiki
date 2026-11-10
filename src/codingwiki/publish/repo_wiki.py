@@ -28,7 +28,7 @@ from codingwiki.domain.wiki import VersionIndex
 from codingwiki.generate.modules import is_public_symbol, module_groups
 
 _INTERNAL_LINK = re.compile(
-    r"\]\(((?:module|interface|flow|config|build|test|overview|home|architecture|glossary)"
+    r"\]\(((?:module|interface|flow|flow-detail|concept|config|build|test|overview|home|architecture|glossary)"
     r"(?:/[^)\s]+)?)\)"
 )
 _CITATION = re.compile(r"[ \t]*(?:\[E\d+\])+")

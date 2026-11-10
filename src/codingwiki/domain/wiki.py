@@ -37,6 +37,8 @@ class PageType(StrEnum):
     MODULE = "module"
     INTERFACE = "interface"
     FLOW = "flow"
+    FLOW_DETAIL = "flow_detail"  # S37：关键业务流程结构化页（优化架构 §14.2）
+    CONCEPT = "concept"  # S37：领域概念页（优化架构 §14.2）
     CONFIG = "config"
     BUILD = "build"
     TEST = "test"
