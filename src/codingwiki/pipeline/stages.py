@@ -20,6 +20,7 @@ from codingwiki.errors import EnvironmentIssue, InputError, InternalError, Retry
 
 if TYPE_CHECKING:
     from codingwiki.backends.protocol import ModelBackend
+    from codingwiki.publish.repo_wiki import RepoWikiTarget
     from codingwiki.snapshot import FilesystemSnapshotStore
 
 
@@ -287,6 +288,13 @@ def stage_verify(ctx: JobContext) -> str:
     return f"复验 {len(page_ids)} 页全部通过"
 
 
+def _repo_wiki_target(ctx: JobContext, snapshot_id: str) -> RepoWikiTarget:
+    from codingwiki.publish.repo_wiki import RepoWikiTarget
+
+    revision = snapshot_id.split("@", 1)[-1] or ctx.repo.revision
+    return RepoWikiTarget.from_repo(ctx.repo.repo_id, ctx.repo.url, revision, ctx.repo.root)
+
+
 def stage_publish(ctx: JobContext) -> str:
     """门禁检查后发布新版本并生成站点（失败时 current 指针不动）。"""
     from codingwiki.publish import FilesystemPageStore
@@ -303,7 +311,13 @@ def stage_publish(ctx: JobContext) -> str:
         "tests": len(facts.tests),
         "config_facts": len(facts.config_facts),
     }
-    index = store.publish(facts.snapshot_id, workdir=workdir, site_profile=profile, facts=facts)
+    index = store.publish(
+        facts.snapshot_id,
+        workdir=workdir,
+        site_profile=profile,
+        facts=facts,
+        repo_wiki=_repo_wiki_target(ctx, facts.snapshot_id),
+    )
     counts = index.status_counts
     return (
         f"version={index.version_id} pages={len(index.pages)} verified={counts.get('verified', 0)}"
