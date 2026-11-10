@@ -1,5 +1,8 @@
-# 本地文档：按项目要求只保留在本机，不推送到 GitHub
-docs/
+# 本地文档：仅架构设计与开发计划随仓库发布，其余过程文档只保留在本机
+docs/*
+!docs/架构设计/
+!docs/架构设计/**
+!docs/CodingWiki-项目开发计划.md
 
 # Python 缓存与虚拟环境
 __pycache__/
